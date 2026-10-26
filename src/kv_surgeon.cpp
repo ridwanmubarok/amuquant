@@ -46,10 +46,14 @@ bool KVSurgeon::execute_eviction(
         extracted_vecs.push_back(vec_ptr);
     }
 
-    // 2. Insert verified representations into TurboQuant vector index
+    // 2. Insert verified representations into TurboQuant vector index with return status verification
     for (size_t i = 0; i < extracted_vecs.size(); ++i) {
         uint64_t token_id = static_cast<uint64_t>(range.p_start + static_cast<int32_t>(i));
-        turbovec_insert_zero_copy(turbovec_idx_, token_id, extracted_vecs[i], embedding_dim_);
+        TurbovecStatus insert_st = turbovec_insert_zero_copy(turbovec_idx_, token_id, extracted_vecs[i], embedding_dim_);
+        if (insert_st != TURBOVEC_STATUS_OK) {
+            // Insertion into vector memory failed: abort eviction immediately to protect unarchived context
+            return false;
+        }
         total_archived_tokens_++;
     }
 

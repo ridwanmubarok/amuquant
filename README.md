@@ -28,6 +28,13 @@ Prior systems exhibit four critical systemic limitations:
 
 **AMU-QUANT** resolves this dilemma through a co-adaptive runtime engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`). Simultaneously, it directs kernel paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to synchronize weight prefetching and context compression in dynamic equilibrium.
 
+### Primary Academic Novelty (Tugas Akhir S1 Framework)
+* **Core Scientific Novelty**: The **Predictive Runtime Host-Aware Memory Pressure Arbitration Algorithm ($\Phi_t$)**, which formalizes dual-budget memory equilibrium between internal process footprint ($\mathcal{U}_{\text{process}}$) and external host OS headroom ($\mathcal{U}_{\text{system}}$), preempting kernel swap thrashing and OOM termination through dynamic tri-modal hysteresis regimes.
+* **Supporting Systems Engineering Modules**:
+  1. **KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment.
+  2. **Episodic Vector Memory**: Non-uniform Lloyd-Max scalar quantization (4-bit/2-bit) providing sub-millisecond semantic retrieval without unbounded memory growth.
+  3. **Layer-wise Paging Manager**: Virtual memory page cache management via `posix_madvise(DONTNEED / WILLNEED)`.
+
 > **Context Memory Architecture Clarification**: AMU-QUANT archives high-dimensional **token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$)** into an episodic SIMD vector memory (`turbovec`) for semantic context recall, rather than storing uncompressed multi-head attention Key/Value tensors across all layers. Physical KV-cache slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` only after atomic representation archiving is verified.
 
 From **Data Science** and **Natural Language Processing (NLP)** perspectives, this system advances:
@@ -148,11 +155,14 @@ flowchart TD
 
 ## 5. Target Research Hypotheses & Live Benchmark Protocol
 
-The comparative metrics below represent the **Formal Research Hypotheses & Target Benchmark Protocol** designed for validation on memory-constrained hardware (e.g., macOS 8 GB / 16 GB developer devices). Researchers and evaluators can reproduce and measure live empirical telemetry directly on hardware using the built-in benchmark executable:
+The comparative metrics below represent the **Formal Research Hypotheses & Target Benchmark Protocol** designed for validation on memory-constrained hardware (e.g., macOS 8 GB / 16 GB developer devices). Researchers and evaluators can reproduce and measure live empirical telemetry directly on hardware using the built-in benchmark executables:
 
 ```bash
-# Run live comparative empirical benchmark on local GGUF model
-./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --tokens 64
+# Option A: Zero-dependency standalone benchmark (Always built by default)
+./build/amuquant_benchmark --tokens 96
+
+# Option B: Full-weight GGUF benchmark with llama.cpp (Setup via ./scripts/setup_llama.sh)
+./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --tokens 32
 ```
 
 | Quantitative Metric | Baseline 1: Standard | Baseline 2: Layer-Streaming | Baseline 3: Eviction Pruning | AMU-QUANT (Hypothesis) |

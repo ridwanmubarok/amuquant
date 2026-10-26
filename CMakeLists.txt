@@ -66,6 +66,11 @@ target_include_directories(turbovec_ffi PUBLIC
 add_executable(simple_inference examples/simple_inference.cpp)
 target_link_libraries(simple_inference PRIVATE amuquant_core)
 
+# Standalone Reproducible Benchmark (Zero external dependencies - always built)
+add_executable(amuquant_benchmark benchmarks/standalone_benchmark.cpp)
+target_link_libraries(amuquant_benchmark PRIVATE amuquant_core)
+install(TARGETS amuquant_benchmark RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 # Optional Interactive Terminal Chat (requires external/llama.cpp)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/include/llama.h")
     add_executable(amuquant_chat examples/amuquant_chat.cpp)
