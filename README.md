@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg?logo=rust)](turbovec-ffi/Cargo.toml)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg?logo=cmake)](CMakeLists.txt)
 
-> **Academic Research Prototype (Tugas Akhir / Undergraduate Thesis Framework)**: This repository provides an experimental co-adaptive inference runtime for resource-constrained commodity devices. Comparative evaluation metrics represent **Formal Research Hypotheses & Evaluation Protocols**, verifiable using the built-in reproducible benchmark suite (`live_benchmark`).
+> **Research Prototype**: This repository provides an experimental co-adaptive inference runtime for resource-constrained commodity devices. Comparative evaluation metrics represent empirical research protocols, verifiable using the built-in reproducible benchmark suite (`live_benchmark`).
 
 ---
 
@@ -28,12 +28,12 @@ Prior systems exhibit four critical systemic limitations:
 
 **AMU-QUANT** resolves this dilemma through a co-adaptive runtime engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`). Simultaneously, it directs kernel paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to synchronize weight prefetching and context compression in dynamic equilibrium.
 
-### Primary Academic Novelty (Tugas Akhir S1 Framework)
-* **Core Scientific Novelty**: The **Predictive Runtime Host-Aware Memory Pressure Arbitration Algorithm ($\Phi_t$)**, which formalizes dual-budget memory equilibrium between internal process footprint ($\mathcal{U}_{\text{process}}$) and external host OS headroom ($\mathcal{U}_{\text{system}}$), preempting kernel swap thrashing and OOM termination through dynamic tri-modal hysteresis regimes.
-* **Supporting Systems Engineering Modules**:
-  1. **KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment.
+### System Architecture and Research Scope
+* **Runtime Host-Aware Memory Pressure Arbitration ($\Phi_t$)**: Evaluates dual-budget memory equilibrium between internal process footprint ($\mathcal{U}_{\text{process}}$) and external host OS headroom ($\mathcal{U}_{\text{system}}$), mitigating kernel swap thrashing and out-of-memory termination through dynamic tri-modal hysteresis regimes.
+* **Integrated Systems Modules**:
+  1. **KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment and persistent translation mapping (`TokenIndexMap`).
   2. **Episodic Vector Memory**: Non-uniform Lloyd-Max scalar quantization (4-bit/2-bit) providing sub-millisecond semantic retrieval without unbounded memory growth.
-  3. **Layer-wise Paging Manager**: Virtual memory page cache management via `posix_madvise(DONTNEED / WILLNEED)`.
+  3. **Virtual Memory Paging Manager**: Virtual memory page cache management via `posix_madvise(DONTNEED / WILLNEED)`.
 
 > **Context Memory Architecture Clarification**: AMU-QUANT archives high-dimensional **token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$)** into an episodic SIMD vector memory (`turbovec`) for semantic context recall, rather than storing uncompressed multi-head attention Key/Value tensors across all layers. Physical KV-cache slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` only after atomic representation archiving is verified.
 

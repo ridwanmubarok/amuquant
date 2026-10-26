@@ -16,7 +16,7 @@ flowchart TB
     end
 
     subgraph AMU-QUANT_Core ["AMU-QUANT Core Runtime Engine (C++17)"]
-        subgraph Mem_Controller ["Subsystem 1: Host-Aware Adaptive Controller (Primary Novelty)"]
+        subgraph Mem_Controller ["Subsystem 1: Host-Aware Adaptive Controller"]
             OS_Sampler["Host Telemetry Sampler (K-token stride)"]
             PredictiveEngine["Dual-Budget Memory Pressure Estimator (Φ_t)"]
             RegimeStateMachine["Tri-Modal Hysteresis State Machine"]
@@ -65,7 +65,7 @@ flowchart TB
 
 ## 2. Core Subsystems Specification
 
-### 2.1 Subsystem 1: Dual-Budget Host-Aware Adaptive Controller (Primary Academic Novelty)
+### 2.1 Subsystem 1: Dual-Budget Host-Aware Adaptive Controller
 The controller operates as the primary decision-maker, evaluated synchronously every $K$ generated tokens ($K \in [4, 16]$) during autoregressive decoding.
 
 * **Key Responsibilities:**
