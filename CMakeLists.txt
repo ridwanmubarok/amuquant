@@ -93,11 +93,43 @@ add_executable(test_amuquant_pipeline tests/test_amuquant_pipeline.cpp)
 target_link_libraries(test_amuquant_pipeline PRIVATE amuquant_core)
 add_test(NAME test_amuquant_pipeline COMMAND test_amuquant_pipeline)
 
-# Installation Rules for Package Distribution
+# Installation Rules and Package Distribution
 include(GNUInstallDirs)
-install(TARGETS amuquant_core turbovec_ffi simple_inference
+include(CMakePackageConfigHelpers)
+
+install(TARGETS amuquant_core turbovec_ffi
+    EXPORT amuquantTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+install(TARGETS simple_inference
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
 install(DIRECTORY include/amuquant DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(EXPORT amuquantTargets
+    FILE amuquantTargets.cmake
+    NAMESPACE amuquant::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/amuquant
+)
+
+configure_package_config_file(
+    cmake/amuquantConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/amuquantConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/amuquant
+)
+
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/amuquantConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY AnyNewerVersion
+)
+
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/amuquantConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/amuquantConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/amuquant
+)
