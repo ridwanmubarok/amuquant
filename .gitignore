@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+compile_commands.json
+
+# Large model weights (Must NOT be pushed to GitHub)
+models/*.gguf
+models/*.bin
+*.gguf
+
+# Rust Cargo build
+target/
+turbovec-ffi/target/
+
+# External dependencies
+external/
+
+# OS and Editor metadata
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+*.log
+scratch/
+tmp/

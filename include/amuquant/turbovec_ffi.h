@@ -1,0 +1,61 @@
+#ifndef AMUQUANT_TURBOVEC_FFI_H
+#define AMUQUANT_TURBOVEC_FFI_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    TURBOVEC_STATUS_OK = 0,
+    TURBOVEC_ERR_NULL_POINTER = -1,
+    TURBOVEC_ERR_INVALID_DIMENSION = -2,
+    TURBOVEC_ERR_UNSUPPORTED_BIT_WIDTH = -3,
+    TURBOVEC_ERR_OUT_OF_MEMORY = -4,
+    TURBOVEC_ERR_PANIC_CAUGHT = -5
+} TurbovecStatus;
+
+typedef struct TurbovecIndexHandle TurbovecIndexHandle;
+
+TurbovecStatus turbovec_init(
+    uint32_t dimension,
+    uint8_t bit_width,
+    TurbovecIndexHandle** out_handle
+);
+
+TurbovecStatus turbovec_insert_zero_copy(
+    TurbovecIndexHandle* handle,
+    uint64_t chunk_id,
+    const float* float_ptr,
+    size_t len
+);
+
+TurbovecStatus turbovec_search_simd(
+    const TurbovecIndexHandle* handle,
+    const float* query_vector,
+    uint32_t top_k,
+    uint64_t* out_ids,
+    float* out_scores,
+    uint32_t* out_count
+);
+
+TurbovecStatus turbovec_requantize_to_2bit(
+    TurbovecIndexHandle* handle
+);
+
+TurbovecStatus turbovec_get_memory_usage(
+    const TurbovecIndexHandle* handle,
+    size_t* out_bytes
+);
+
+TurbovecStatus turbovec_free(
+    TurbovecIndexHandle* handle
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // AMUQUANT_TURBOVEC_FFI_H
