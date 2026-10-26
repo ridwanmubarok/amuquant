@@ -42,6 +42,35 @@ From **Data Science** and **Natural Language Processing (NLP)** perspectives, th
 2. **Time-series predictive modeling** on OS memory telemetry to anticipate memory spikes prior to kernel page thrashing.
 3. **Statistical evaluation of language modeling fidelity (Perplexity / PPL)** and information retrieval accuracy (Recall@K).
 
+### 1.1 Academic Novelty and Comparative Literature Differentiation
+
+In academic research and undergraduate thesis defense (Tugas Akhir S1), clarifying the exact boundary between standard engineering primitives and genuine algorithmic novelty is essential:
+
+* **Standard Primitives (Non-Novel Baselines)**:
+  * *Vector Quantization (TurboQuant)*: Scalar Lloyd-Max quantization applied to embedding representations has prior literature precedents (Zandieh et al., ICLR 2026; Codrai, 2026).
+  * *KV-Cache Attention Eviction*: Preserving attention sinks and recent sliding windows while dropping middle tokens was established by StreamingLLM (Xiao et al., ICLR 2024) and H2O (Zhang et al., NeurIPS 2023).
+  * *Host Telemetry Sampling*: Querying `task_info`, `mach_vm_info`, or `/proc/meminfo` is standard operating systems telemetry.
+
+* **Defensible Thesis Novelty**:
+  * **Predictive Cost-Benefit Multi-Action Arbitration Policy (PCBM-Policy)**:
+    A runtime decision algorithm that monitors physical host virtual memory and memory growth velocity ($\dot{M}$), projects memory saturation over a lookahead temporal horizon ($\tau_{\text{horizon}}$), and selects optimal mitigation actions from a multi-action portfolio (transactional KV pruning, in-place 4-bit to 2-bit requantization, prefetch depth throttling, and advisory OS paging) by minimizing a joint cost-benefit utility loss function:
+    $$ \mathcal{J}(\mathbf{a}) = \text{Risk}_{\text{OOM}}(\mathbf{a}; \widehat{M}(t+\tau)) + \lambda_{\text{lat}} \cdot \mathcal{C}_{\text{lat}}(\mathbf{a}) + \lambda_{\text{qual}} \cdot \mathcal{L}_{\text{qual}}(\mathbf{a}) $$
+    under strict **transactional commit barrier** invariants.
+
+For a comprehensive analysis of prior works, see [academic_novelty_formulation.md](file:///Users/amubhya/workspace/aegis/docs/academic_novelty_formulation.md).
+
+#### Systematic State-of-the-Art Literature Comparison Matrix
+
+| Dimension | Ada-KV (arXiv:2407.11550) | IndexMem (ICLR 2025) | mzCache (MobiCom '26) | StreamingLLM / H2O | AirLLM (2024) | AMU-QUANT (This Work) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Primary Goal** | Minimize attention approximation loss | Preserve long-context recall across benchmarks | Accelerate Time-to-First-Token upon app resume | Prevent attention cache unbounded expansion | Run 70B models on low-VRAM GPUs via disk paging | Zero-OOM inference survival under dynamic host memory starvation |
+| **Decision Signal** | Intra-model attention head entropy and score variance | Learned neural attention indexer network | Android mobile OS activity lifecycle events (`onPause`, `onResume`) | Local attention window and heavy-hitter token scores | Static single-layer sequential pipeline | Host physical RAM, process RSS growth velocity ($\dot{M}$), and swap thrashing |
+| **Temporal Prediction** | None (Static budget allocated at prefill) | None (Token importance scoring per step) | Reactive (Restores state after OS eviction occurred) | None (Static heuristic window $W$) | None (Static sequential execution) | **Predictive Lookahead**: Projections over $\tau_{\text{horizon}}$ to anticipate OS swapping |
+| **Action Space** | Single action: Varying token retention budget across heads | Single action: Evict token and write to latent recurrent state | Two actions: GPU-CPU buffer swap and concurrent restoration | Single action: Drop tokens permanently to trash | Single action: Sequential layer-by-layer weight loading | **Multi-Action Portfolio**: (1) Transactional KV pruning, (2) In-place 4b to 2b requantization, (3) Prefetch throttling, (4) Advisory paging |
+| **Objective Function** | Theoretical attention bound $\min \|A - \widehat{A}\|$ | Latent state reconstruction loss | Minimize resume latency $\min \text{TTFT}$ | Maximize local attention mass | Minimize per-step GPU VRAM footprint | **Composite Utility Function**: $\arg\min_{\mathbf{a}} [\text{Risk}_{\text{OOM}} + \lambda_{\text{lat}}\mathcal{C}_{\text{lat}} + \lambda_{\text{qual}}\mathcal{L}_{\text{qual}}]$ |
+| **Safety Invariant** | None (Dropped KV is lost) | Soft latent representation | Storage-backed re-read fallback | Irreversible context loss (*Evict-to-Trash*) | Static storage dependency | **Batch Commit Barrier**: Guaranteed rollback if vector index insertion fails |
+| **Target Substrate** | Cloud GPU Clusters (NVIDIA A100/H100) | Cloud GPU Clusters (NVIDIA A100/H100) | Mobile Smartphones (Android SoCs) | Server GPUs & Edge Devices | Commodity Workstations | Commodity Unified Memory Hardware (Apple Silicon, ARM64, Linux) |
+
 ---
 
 ## 2. Generalized Cross-Scale Memory Spectrum
@@ -109,6 +138,50 @@ Nominal parameters: $\beta = 0.25$, $\gamma = 0.15$, and $\tau_{\text{horizon}} 
   Middle tokens excised from physical KV-cache and archived to `turbovec` 4-bit ($\approx 7.8\times$ compression). Slower layers are evicted via `posix_madvise(..., POSIX_MADV_DONTNEED)`. Prefetch depth throttled to 1 layer.
 * **Regime 3: Ultra-Low Memory Survival ($\Phi_t > \theta_{\text{high}}$)**  
   In-place requantization of the `turbovec` index from 4-bit to 2-bit ($\approx 15.5\times$ compression). Enforces strict single-layer execution (prefetch depth = 0) with sub-0.25 ms SIMD cosine recall.
+
+### 3.4 Predictive Cost-Benefit Multi-Action Arbitration Policy (PCBM-Policy)
+
+Under dynamic and unpredictable host workloads, static threshold transitions can either act reactively (triggering swapping before mitigation takes effect) or excessively throttle throughput during transient memory blips. AMU-QUANT formulates runtime memory mitigation as an optimization problem over a candidate action portfolio $\mathcal{A} = \{\mathbf{a}_0, \mathbf{a}_1, \mathbf{a}_2\}$:
+
+$$
+\mathbf{a}^* = \arg\min_{\mathbf{a} \in \mathcal{A}} \mathcal{J}(\mathbf{a})
+$$
+
+Where the composite utility cost function is defined as:
+
+$$
+\mathcal{J}(\mathbf{a}) = \text{Risk}_{\text{OOM}}(\mathbf{a};\,\widehat{M}(t+\tau_{\text{horizon}})) + \lambda_{\text{lat}} \cdot \mathcal{C}_{\text{lat}}(\mathbf{a}) + \lambda_{\text{qual}} \cdot \mathcal{L}_{\text{qual}}(\mathbf{a})
+$$
+
+1. **Projected Memory Deficit and OOM Risk**:
+   The controller projects process RSS and available host RAM over temporal lookahead horizon $\tau_{\text{horizon}} = 2.0\text{ s}$:
+   $$
+   \widehat{M}_{\text{proc}}(t+\tau) = M_{\text{proc}}(t) + \dot{M}_{\text{proc}}(t) \cdot \tau_{\text{horizon}} - \Delta M_{\text{reclaimed}}(\mathbf{a})
+   $$
+   $$
+   \Delta_{\text{deficit}}(\mathbf{a}) = \widehat{M}_{\text{proc}}(t+\tau) - M_{\text{limit}}
+   $$
+   If $\Delta_{\text{deficit}} > 0$, the OOM risk dominates all other terms:
+   $$
+   \text{Risk}_{\text{OOM}}(\mathbf{a}) = \text{Penalty}_{\text{OOM}} \cdot \left(\frac{\Delta_{\text{deficit}}}{M_{\text{limit}}}\right), \quad \text{Penalty}_{\text{OOM}} = 10.0
+   $$
+
+2. **Adaptation Latency Cost ($\mathcal{C}_{\text{lat}}$)**:
+   Measures computational overhead of each candidate mitigation action relative to token generation:
+   * $\mathbf{a}_0$ (Nominal): $\mathcal{C}_{\text{lat}} = 0.0$
+   * $\mathbf{a}_1$ (Balanced 4-bit): $\mathcal{C}_{\text{lat}} = 0.05$ (Sub-millisecond SIMD quantization)
+   * $\mathbf{a}_2$ (Survival 2-bit): $\mathcal{C}_{\text{lat}} = 0.20$ (Vector requantization + single-layer paging stall)
+
+3. **Semantic Quality Loss ($\mathcal{L}_{\text{qual}}$)**:
+   Models expected information degradation from vector downscaling:
+   * $\mathbf{a}_0$ (FP16 Attention): $\mathcal{L}_{\text{qual}} = 0.0$
+   * $\mathbf{a}_1$ (4-bit Lloyd-Max): $\mathcal{L}_{\text{qual}} \approx 0.14$ (Cosine match $\approx 0.86$)
+   * $\mathbf{a}_2$ (2-bit Lloyd-Max): $\mathcal{L}_{\text{qual}} \approx 0.20$ (Cosine match $\approx 0.80$)
+
+By solving $\arg\min_{\mathbf{a}} \mathcal{J}(\mathbf{a})$ at runtime, the engine strictly suppresses unneeded precision downscaling when headroom is safe, while pre-emptively triggering deep compression before physical RAM exhaustion occurs. Both policies are selectable at initialization via `AMUQuantConfig::policy`:
+* `ArbitrationPolicy::PREDICTIVE_COST_BENEFIT` (Utility-optimizing lookahead controller)
+* `ArbitrationPolicy::THRESHOLD_HYSTERESIS` (Static threshold baseline FSM)
+* `ArbitrationPolicy::STATIC_KV_ONLY` (Ablation baseline with static attention eviction)
 
 ---
 
@@ -184,6 +257,11 @@ AMU-QUANT evaluates inference efficiency and memory stabilization using a formal
 
 # Scenario 2B: Controlled real host memory stress test (Physical Memory Pressure)
 ./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --scenario real-stress --tokens 64
+
+# Policy Ablation: Compare Predictive Cost-Benefit vs Static Threshold vs Static KV-Only
+./build/live_benchmark --scenario mock-stress --policy predictive --tokens 64
+./build/live_benchmark --scenario mock-stress --policy threshold --tokens 64
+./build/live_benchmark --scenario mock-stress --policy kv-only --tokens 64
 ```
 
 ### 5.1 Scenario 1: Nominal 3-Way Methodological Parity (64 Tokens)
@@ -419,6 +497,9 @@ target_link_libraries(my_inference_app PRIVATE amuquant::amuquant_core)
 8. **Lethe Authors. (2026).** *Lethe: Layer-Adaptive KV Cache Eviction with Dynamic Sparsity Allocation*. In *AAAI 2026*. [arXiv:2511.12612](https://arxiv.org/abs/2511.12612).
 9. **TheTom. (2026).** *llama-cpp-turboquant: Experimental TurboQuant integration in llama.cpp*. [GitHub](https://github.com/TheTom/llama-cpp-turboquant).
 10. **AmesianX. (2026).** *TurboQuant: C++ Implementation and Exploration for Quantized Inference*. [GitHub](https://github.com/AmesianX/TurboQuant).
+11. **mzCache Authors. (2026).** *mzCache: Efficient Multi-Tasking Mobile LLM Inference via Fine-Grained Memory Reclamation and Fast Resume*. In *ACM MobiCom 2026*. [arXiv:2609.01338](https://arxiv.org/abs/2609.01338).
+12. **Ada-KV Authors. (2024).** *Ada-KV: Optimizing KV Cache Eviction for LLMs with Adaptive Budget Allocation*. [arXiv:2407.11550](https://arxiv.org/abs/2407.11550).
+13. **IndexMem Authors. (2025).** *IndexMem: Indexed Persistent Memory for Long-Context LLMs*. In *ICLR 2025*.
 
 ---
 

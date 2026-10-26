@@ -72,6 +72,130 @@ double AMUQuantController::compute_phi_score(
     return phi;
 }
 
+double AMUQuantController::evaluate_action_cost(
+    Regime candidate_regime,
+    const MemoryStats& current_stats,
+    double projected_process_rss,
+    double projected_available_ram,
+    uint32_t current_seq_len
+) const {
+    uint64_t safe_limit = (config_.memory_limit_bytes > config_.os_reserved_bytes) ? 
+                          (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
+    if (safe_limit == 0) return 0.0;
+
+    // Estimated memory mitigation per token for candidate action
+    size_t bytes_per_token = 2ULL * config_.num_layers * 8 * 128 * sizeof(uint16_t);
+    if (bytes_per_token == 0) bytes_per_token = 131072;
+
+    double memory_mitigation_bytes = 0.0;
+    double latency_cost = 0.0;
+    double quality_loss = 0.0;
+
+    switch (candidate_regime) {
+        case Regime::REGIME_1_HIGH_THROUGHPUT:
+            memory_mitigation_bytes = 0.0;
+            latency_cost = 0.0;
+            quality_loss = 0.0;
+            break;
+
+        case Regime::REGIME_2_BALANCED_OFFLOAD: {
+            uint32_t sink = config_.attention_sink_tokens;
+            uint32_t win = config_.recent_window_tokens;
+            if (current_seq_len > sink + win) {
+                uint32_t middle_count = current_seq_len - sink - win;
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.85;
+            }
+            latency_cost = 0.05; // ~0.5ms SIMD commit overhead
+            quality_loss = 0.14; // 4-bit Lloyd-Max distortion (1 - 0.86 cosine)
+            break;
+        }
+
+        case Regime::REGIME_3_ULTRA_LOW_SURVIVAL: {
+            uint32_t sink = config_.attention_sink_tokens;
+            uint32_t win = config_.min_recent_window_tokens;
+            if (current_seq_len > sink + win) {
+                uint32_t middle_count = current_seq_len - sink - win;
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.93;
+            }
+            latency_cost = 0.18; // Requantization pass + single-layer paging
+            quality_loss = 0.22; // 2-bit Lloyd-Max distortion (1 - 0.78 cosine)
+            break;
+        }
+    }
+
+    double mitigated_process_rss = std::max(0.0, projected_process_rss - memory_mitigation_bytes);
+    double mitigated_available_ram = projected_available_ram + memory_mitigation_bytes;
+
+    double process_deficit = (mitigated_process_rss > safe_limit) ? (mitigated_process_rss - safe_limit) : 0.0;
+    double host_deficit = (mitigated_available_ram < config_.os_reserved_bytes) ? 
+                          static_cast<double>(config_.os_reserved_bytes - mitigated_available_ram) : 0.0;
+    
+    double max_deficit = std::max(process_deficit, host_deficit);
+    double normalized_deficit = max_deficit / static_cast<double>(safe_limit);
+    
+    // Proportional OOM risk penalty: strictly decreases as more memory is mitigated
+    double oom_risk = config_.risk_oom_penalty * normalized_deficit;
+
+    // Severe penalty when available RAM breaches 75% of OS reserve floor
+    if (mitigated_available_ram < (static_cast<double>(config_.os_reserved_bytes) * 0.75)) {
+        if (candidate_regime != Regime::REGIME_3_ULTRA_LOW_SURVIVAL) {
+            oom_risk += 5.0;
+        }
+    } else if (mitigated_available_ram < static_cast<double>(config_.os_reserved_bytes)) {
+        if (candidate_regime == Regime::REGIME_1_HIGH_THROUGHPUT) {
+            oom_risk += 2.5;
+        }
+    }
+
+    if (current_stats.swap_used_bytes > 500ULL * 1024ULL * 1024ULL && candidate_regime == Regime::REGIME_1_HIGH_THROUGHPUT) {
+        oom_risk += 2.0;
+    }
+
+    return oom_risk + 
+           (config_.weight_latency_cost * latency_cost) + 
+           (config_.weight_quality_loss * quality_loss);
+}
+
+Regime AMUQuantController::arbitrate_predictive_cost_benefit(
+    const MemoryStats& current_stats,
+    double elapsed_sec,
+    double delta_rss_bytes,
+    uint32_t current_seq_len,
+    double& out_optimal_cost
+) const {
+    double dt = std::max(elapsed_sec, 0.05);
+    double dM_dt = delta_rss_bytes / dt;
+    double projected_delta = std::max(0.0, dM_dt * config_.tau_horizon_sec);
+
+    double projected_process_rss = static_cast<double>(current_stats.process_rss_bytes) + projected_delta;
+    double projected_available_ram = (current_stats.available_ram_bytes > 0) ?
+        std::max(0.0, static_cast<double>(current_stats.available_ram_bytes) - projected_delta) : 0.0;
+
+    double cost_r1 = evaluate_action_cost(Regime::REGIME_1_HIGH_THROUGHPUT, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
+    double cost_r2 = evaluate_action_cost(Regime::REGIME_2_BALANCED_OFFLOAD, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
+    double cost_r3 = evaluate_action_cost(Regime::REGIME_3_ULTRA_LOW_SURVIVAL, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
+
+    // Minor hysteresis dampener to avoid high-frequency switching between adjacent regimes
+    if (current_regime_ == Regime::REGIME_1_HIGH_THROUGHPUT) cost_r1 -= 0.02;
+    else if (current_regime_ == Regime::REGIME_2_BALANCED_OFFLOAD) cost_r2 -= 0.02;
+    else if (current_regime_ == Regime::REGIME_3_ULTRA_LOW_SURVIVAL) cost_r3 -= 0.02;
+
+    Regime best_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
+    double min_cost = cost_r1;
+
+    if (cost_r2 < min_cost) {
+        min_cost = cost_r2;
+        best_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
+    }
+    if (cost_r3 < min_cost) {
+        min_cost = cost_r3;
+        best_regime = Regime::REGIME_3_ULTRA_LOW_SURVIVAL;
+    }
+
+    out_optimal_cost = min_cost;
+    return best_regime;
+}
+
 StepDecision AMUQuantController::on_token_step(
     uint32_t token_step,
     uint32_t current_seq_len,
@@ -84,6 +208,7 @@ StepDecision AMUQuantController::on_token_step(
     decision.prefetch_depth = prefetch_depth_;
     decision.aggressive_evict = aggressive_evict_;
     decision.phi_score = last_phi_;
+    decision.policy_used = config_.policy;
 
     // Sample telemetry at scheduled token stride
     if (token_step % config_.eval_interval_tokens != 0 && !first_eval_) {
@@ -105,33 +230,46 @@ StepDecision AMUQuantController::on_token_step(
     last_phi_ = phi;
     decision.phi_score = phi;
 
-    // Hysteresis-guarded finite state machine evaluation
     Regime target_regime = current_regime_;
 
-    switch (current_regime_) {
-        case Regime::REGIME_1_HIGH_THROUGHPUT:
-            if (phi > config_.theta_high) {
-                target_regime = Regime::REGIME_3_ULTRA_LOW_SURVIVAL;
-            } else if (phi > config_.theta_low) {
-                target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
-            }
-            break;
+    if (config_.policy == ArbitrationPolicy::PREDICTIVE_COST_BENEFIT) {
+        double optimal_cost = 0.0;
+        target_regime = arbitrate_predictive_cost_benefit(stats, elapsed_sec, delta_rss, current_seq_len, optimal_cost);
+        decision.selected_utility_cost = optimal_cost;
+    } else if (config_.policy == ArbitrationPolicy::STATIC_KV_ONLY) {
+        // Naive attention-eviction: evicts unconditionally whenever context exceeds recent window
+        if (current_seq_len > config_.attention_sink_tokens + config_.recent_window_tokens) {
+            target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
+        } else {
+            target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
+        }
+    } else {
+        // THRESHOLD_HYSTERESIS: Standard FSM state machine
+        switch (current_regime_) {
+            case Regime::REGIME_1_HIGH_THROUGHPUT:
+                if (phi > config_.theta_high) {
+                    target_regime = Regime::REGIME_3_ULTRA_LOW_SURVIVAL;
+                } else if (phi > config_.theta_low) {
+                    target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
+                }
+                break;
 
-        case Regime::REGIME_2_BALANCED_OFFLOAD:
-            if (phi > config_.theta_high) {
-                target_regime = Regime::REGIME_3_ULTRA_LOW_SURVIVAL;
-            } else if (phi <= (config_.theta_low - config_.delta_hyst)) {
-                target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
-            }
-            break;
+            case Regime::REGIME_2_BALANCED_OFFLOAD:
+                if (phi > config_.theta_high) {
+                    target_regime = Regime::REGIME_3_ULTRA_LOW_SURVIVAL;
+                } else if (phi <= (config_.theta_low - config_.delta_hyst)) {
+                    target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
+                }
+                break;
 
-        case Regime::REGIME_3_ULTRA_LOW_SURVIVAL:
-            if (phi <= (config_.theta_low - config_.delta_hyst)) {
-                target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
-            } else if (phi <= (config_.theta_high - config_.delta_hyst)) {
-                target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
-            }
-            break;
+            case Regime::REGIME_3_ULTRA_LOW_SURVIVAL:
+                if (phi <= (config_.theta_low - config_.delta_hyst)) {
+                    target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
+                } else if (phi <= (config_.theta_high - config_.delta_hyst)) {
+                    target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
+                }
+                break;
+        }
     }
 
     apply_regime_transition(target_regime, current_seq_len, extractor, seq_rm, seq_add, decision);

@@ -188,6 +188,7 @@ int main(int argc, char** argv) {
     std::string model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
     uint32_t target_tokens = 64;
     std::string scenario = "all";
+    std::string policy_arg = "predictive";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -197,16 +198,26 @@ int main(int argc, char** argv) {
             target_tokens = static_cast<uint32_t>(std::stoi(argv[++i]));
         } else if (arg == "--scenario" && i + 1 < argc) {
             scenario = argv[++i];
+        } else if (arg == "--policy" && i + 1 < argc) {
+            policy_arg = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "Usage: live_benchmark [--model <path.gguf>] [--tokens <count>] [--scenario <nominal|mock-stress|real-stress|all>]\n";
+            std::cout << "Usage: live_benchmark [--model <path.gguf>] [--tokens <count>] [--scenario <nominal|mock-stress|real-stress|all>] [--policy <predictive|threshold|kv-only>]\n";
             return 0;
         }
+    }
+
+    ArbitrationPolicy selected_policy = ArbitrationPolicy::PREDICTIVE_COST_BENEFIT;
+    if (policy_arg == "threshold") {
+        selected_policy = ArbitrationPolicy::THRESHOLD_HYSTERESIS;
+    } else if (policy_arg == "kv-only") {
+        selected_policy = ArbitrationPolicy::STATIC_KV_ONLY;
     }
 
     std::cout << "================================================================================\n";
     std::cout << "  AMU-QUANT LIVE EMPIRICAL BENCHMARK: MULTI-SCENARIO EVALUATION SUITE            \n";
     std::cout << "  Target Model: " << model_path << "\n";
     std::cout << "  Scenario Mode: " << scenario << " | Decode Horizon: " << target_tokens << " tokens\n";
+    std::cout << "  Arbitration Policy: " << policy_to_string(selected_policy) << "\n";
     std::cout << "================================================================================\n" << std::endl;
 
     if (!std::filesystem::exists(model_path)) {
@@ -491,6 +502,7 @@ int main(int argc, char** argv) {
             cfg.recent_window_tokens = 32;
             cfg.min_recent_window_tokens = 16;
             cfg.attention_sink_tokens = 4;
+            cfg.policy = selected_policy;
 
             AMUQuantEngine engine(cfg);
             Status st = engine.initialize();
@@ -656,6 +668,7 @@ int main(int argc, char** argv) {
         cfg.recent_window_tokens = 32;
         cfg.min_recent_window_tokens = 16;
         cfg.attention_sink_tokens = 4;
+        cfg.policy = selected_policy;
 
         AMUQuantEngine engine(cfg);
         Status st = engine.initialize();
@@ -857,6 +870,7 @@ int main(int argc, char** argv) {
         cfg.recent_window_tokens = 32;
         cfg.min_recent_window_tokens = 16;
         cfg.attention_sink_tokens = 4;
+        cfg.policy = selected_policy;
 
         AMUQuantEngine engine(cfg);
         Status st = engine.initialize();

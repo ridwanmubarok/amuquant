@@ -22,6 +22,24 @@ enum class Regime : uint8_t {
 };
 
 /**
+ * @brief Runtime decision arbitration policies.
+ */
+enum class ArbitrationPolicy : uint8_t {
+    THRESHOLD_HYSTERESIS = 0,    // Baseline static threshold-based FSM
+    PREDICTIVE_COST_BENEFIT = 1, // Novel utility-optimizing decision policy minimizing J(a)
+    STATIC_KV_ONLY = 2           // Naive attention-eviction baseline without host telemetry
+};
+
+inline std::string policy_to_string(ArbitrationPolicy p) {
+    switch (p) {
+        case ArbitrationPolicy::THRESHOLD_HYSTERESIS:   return "THRESHOLD_HYSTERESIS";
+        case ArbitrationPolicy::PREDICTIVE_COST_BENEFIT: return "PREDICTIVE_COST_BENEFIT";
+        case ArbitrationPolicy::STATIC_KV_ONLY:          return "STATIC_KV_ONLY";
+        default: return "UNKNOWN";
+    }
+}
+
+/**
  * @brief Execution status codes for AMU-QUANT operations.
  */
 enum class Status : int32_t {
@@ -75,6 +93,12 @@ struct AMUQuantConfig {
     uint32_t num_layers{64};
     uint32_t embedding_dim{4096};
     uint8_t initial_bit_width{4};
+
+    // Arbitration decision policy and multi-objective weights
+    ArbitrationPolicy policy{ArbitrationPolicy::THRESHOLD_HYSTERESIS};
+    double weight_latency_cost{0.25};   // Penalty weight for adaptation execution overhead (lambda_lat)
+    double weight_quality_loss{0.35};   // Penalty weight for quantization bit-width reduction (lambda_qual)
+    double risk_oom_penalty{10.0};      // Critical penalty scale for projected physical OOM
 };
 
 /**
@@ -87,6 +111,8 @@ struct StepDecision {
     bool kv_pruned{false};
     bool requantized_to_2bit{false};
     double phi_score{0.0};
+    ArbitrationPolicy policy_used{ArbitrationPolicy::THRESHOLD_HYSTERESIS};
+    double selected_utility_cost{0.0};
 };
 
 inline std::string regime_to_string(Regime r) {

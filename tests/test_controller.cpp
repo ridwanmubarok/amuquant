@@ -22,6 +22,7 @@ int main() {
     cfg.theta_high = 0.85;
     cfg.delta_hyst = 0.05;
     cfg.eval_interval_tokens = 1; // Evaluate every step for test precision
+    cfg.policy = ArbitrationPolicy::THRESHOLD_HYSTERESIS;
 
     TurbovecIndexHandle* handle = nullptr;
     turbovec_init(cfg.embedding_dim, cfg.initial_bit_width, &handle);
@@ -116,6 +117,69 @@ int main() {
     }
 
     turbovec_free(handle);
-    std::cout << "[PASS] AMUQuantController & State Machine Validation Succeeded.\n" << std::endl;
+    std::cout << "[PASS] Threshold FSM Validation Succeeded.\n" << std::endl;
+
+    // Test 2: Predictive Cost-Benefit Multi-Action Policy
+    {
+        std::cout << "[TEST] Starting Predictive Cost-Benefit Multi-Action Policy Validation..." << std::endl;
+
+        AMUQuantConfig cfg_opt;
+        cfg_opt.memory_limit_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL; // 16 GB
+        cfg_opt.os_reserved_bytes  = 2ULL * 1024ULL * 1024ULL * 1024ULL;  // 2 GB (Safe limit = 14 GB)
+        cfg_opt.policy = ArbitrationPolicy::PREDICTIVE_COST_BENEFIT;
+        cfg_opt.weight_latency_cost = 0.25;
+        cfg_opt.weight_quality_loss = 0.35;
+        cfg_opt.risk_oom_penalty = 10.0;
+        cfg_opt.tau_horizon_sec = 2.0;
+        cfg_opt.eval_interval_tokens = 1;
+
+        TurbovecIndexHandle* opt_handle = nullptr;
+        turbovec_init(cfg_opt.embedding_dim, cfg_opt.initial_bit_width, &opt_handle);
+
+        {
+            auto telemetry = std::make_shared<SystemTelemetry>();
+            telemetry->set_mock_mode(true);
+            auto layer_mgr = std::make_shared<LayerManager>();
+            auto kv_surgeon = std::make_shared<KVSurgeon>(opt_handle, cfg_opt.embedding_dim);
+
+            AMUQuantController controller(cfg_opt, telemetry, layer_mgr, kv_surgeon, opt_handle);
+
+            std::vector<float> dummy(cfg_opt.embedding_dim, 0.1f);
+            auto extractor = [&](int32_t) -> const float* { return dummy.data(); };
+            auto seq_rm = [](int32_t, int32_t) {};
+            auto seq_add = [](int32_t, int32_t, int32_t) {};
+
+            // 1. Low load: RSS = 4GB, Available = 10GB -> Controller selects REGIME_1
+            MemoryStats s1{};
+            s1.timestamp_sec = 10.0;
+            s1.total_ram_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+            s1.process_rss_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
+            s1.available_ram_bytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
+            telemetry->set_mock_stats(s1);
+
+            auto d1 = controller.on_token_step(0, 100, extractor, seq_rm, seq_add);
+            assert(d1.regime == Regime::REGIME_1_HIGH_THROUGHPUT);
+            assert(d1.policy_used == ArbitrationPolicy::PREDICTIVE_COST_BENEFIT);
+            std::cout << "  - Low Load -> Policy chose Regime 1 (Cost: " << d1.selected_utility_cost << "): OK" << std::endl;
+
+            // 2. High memory growth velocity: RSS jumps by 8 GB in 1 sec -> Projected deficit triggers REGIME_3
+            MemoryStats s2{};
+            s2.timestamp_sec = 11.0;
+            s2.total_ram_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+            s2.process_rss_bytes = 13ULL * 1024ULL * 1024ULL * 1024ULL;
+            s2.available_ram_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+            telemetry->set_mock_stats(s2);
+
+            auto d2 = controller.on_token_step(1, 400, extractor, seq_rm, seq_add);
+            assert(d2.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL);
+            assert(d2.requantized_to_2bit);
+            std::cout << "  - High Growth Velocity Spike -> Cost-Benefit selected Regime 3 Survival (Cost: " 
+                      << d2.selected_utility_cost << "): OK" << std::endl;
+        }
+
+        turbovec_free(opt_handle);
+    }
+
+    std::cout << "[PASS] All AMUQuantController Policy Validations Succeeded.\n" << std::endl;
     return 0;
 }

@@ -48,6 +48,28 @@ public:
         double delta_rss_bytes
     ) const;
 
+    /**
+     * @brief Evaluates composite cost-benefit utility J(a) for a candidate action regime.
+     */
+    double evaluate_action_cost(
+        Regime candidate_regime,
+        const MemoryStats& current_stats,
+        double projected_process_rss,
+        double projected_available_ram,
+        uint32_t current_seq_len
+    ) const;
+
+    /**
+     * @brief Computes optimal action regime minimizing the composite utility objective.
+     */
+    Regime arbitrate_predictive_cost_benefit(
+        const MemoryStats& current_stats,
+        double elapsed_sec,
+        double delta_rss_bytes,
+        uint32_t current_seq_len,
+        double& out_optimal_cost
+    ) const;
+
     Regime get_current_regime() const { return current_regime_; }
     uint32_t get_prefetch_depth() const { return prefetch_depth_; }
     bool is_aggressive_evict() const { return aggressive_evict_; }
