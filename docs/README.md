@@ -1,47 +1,46 @@
-# AMU-QUANT Documentation and Scientific Specifications
+# AMU-QUANT Technical Documentation
 
-Dokumentasi ini memuat spesifikasi ilmiah, rancangan matematis, arsitektur sistem, dan metodologi eksperimental untuk proyek **AMU-QUANT** (*Co-Adaptive Layer-wise Weight Streaming and TurboQuant Context Compression for On-Device Large Language Model Inference*).
+This directory contains the scientific specifications, mathematical formulations, subsystem architecture, foreign function interface (FFI) contracts, and experimental evaluation methodology for **AMU-QUANT** (*Co-Adaptive Layer-wise Weight Streaming and TurboQuant Context Compression for On-Device Large Language Model Inference*).
 
 ---
 
-## 1. Daftar Dokumen Spesifikasi Ilmiah
+## 1. Documentation Index
 
-| No | Dokumen | Ringkasan Isi |
+| Index | Document | Summary |
 |:---:|:---|:---|
-| **01** | [**Proposal Usulan Tugas Akhir**](01_PROPOSAL_TUGAS_AKHIR.md) | Naskah formal usulan Tugas Akhir lengkap (Abstrak, Bab I-IV, rumusan masalah, batasan teknis, tujuan, dan metodologi). |
-| **02** | [**Arsitektur Sistem dan Alur Kerja**](02_ARSITEKTUR_SISTEM.md) | Rancangan 4 subsistem (Layer Manager, KV Surgery, FFI Bridge, Controller), alur *zero-copy*, dan penanganan *thread-safety*. |
-| **03** | [**Model Matematika dan Kontroler Ko-Adaptif**](03_MODEL_MATEMATIKA_DAN_KONTROLER.md) | Pertidaksamaan ekuilibrium memori ganda, formula $\Phi_t$, analisis histeresis, dan pseudocode algoritma penjadwalan. |
-| **04** | [**Desain Jembatan turbovec-ffi (C-ABI)**](04_DESAIN_TURBOVEC_FFI.md) | Header C-ABI `turbovec_ffi.h`, implementasi Rust `ffi.rs`, rotasi ortogonal acak, kuantisasi Lloyd-Max, dan SIMD. |
-| **05** | [**Metodologi dan Rencana Eksperimen**](05_METODOLOGI_DAN_RENCANA_EKSPERIMEN.md) | Setup perangkat keras (RAM 8 GB dan 16 GB), spektrum model uji lintas-skala (sub-3B, 7B/8B, 14B, 32B), 4 baseline, 3 skenario uji, dan metrik kuantitatif. |
-| **06** | [**Tinjauan Pustaka dan Komparasi State-of-the-Art**](06_TINJAUAN_PUSTAKA_DAN_REFERENSI.md) | Kajian pustaka kritis (AirLLM, llama.cpp, StreamingLLM, H2O, ThinKV, Lethe, TurboQuant) dan analisis kebaruan komparatif. |
+| **01** | [**System Architecture**](01_SYSTEM_ARCHITECTURE.md) | High-level subsystem layout (Layer Manager, KV Surgery, FFI Bridge, Controller), zero-copy pointer flows, and thread-safety invariants. |
+| **02** | [**Mathematical Model & Controller**](02_MATHEMATICAL_MODEL_AND_CONTROLLER.md) | Dual-budget memory equilibrium inequality, predictive pressure metric $\Phi_t$, hysteresis state machine, and scheduling algorithm. |
+| **03** | [**turbovec FFI Specification**](03_TURBOVEC_FFI_SPECIFICATION.md) | C-ABI interface header `turbovec_ffi.h`, Rust bridge implementation, Lloyd-Max codebooks, in-place 2-bit requantization, and SIMD vectorization. |
+| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds (8 GB and 16 GB nodes), cross-scale model spectrum (sub-3B, 7B/8B, 14B/32B, 70B+), 4 baseline methods, 3 stress-testing scenarios, and metrics. |
+| **05** | [**Literature Review & References**](05_LITERATURE_REVIEW_AND_REFERENCES.md) | Critical analysis of AirLLM, llama.cpp mmap, evict-to-trash pruning (StreamingLLM, H2O, ThinKV, Lethe), Data Science & NLP theoretical foundations, and verified citations. |
 
 ---
 
-## 2. Arsitektur Alur Kerja Ko-Adaptif
+## 2. Co-Adaptive Execution Lifecycle
 
 ```mermaid
 flowchart TD
-    subgraph Kernel_OS ["Lapisan Kernel OS (Virtual Memory dan Telemetri)"]
-        VM_Stat["Telemetri RAM dan Swap (/proc/meminfo / mach_vm_info)"]
+    subgraph Kernel_OS ["Operating System Kernel & Virtual Memory"]
+        VM_Stat["Memory & Swap Telemetry (/proc/meminfo / mach_vm_info)"]
         KernelMadvise["Kernel Directives: posix_madvise(DONTNEED / WILLNEED)"]
     end
 
     subgraph AMUQuant_Engine ["AMU-QUANT Co-Adaptive Controller (C++17)"]
-        Sampling["Periodic Telemetry Sampler (Setiap K Token)"]
-        ScoreEngine["Kalkulator Skor Tekanan Prediktif: Φ_t"]
-        RegimeLogic{"State Machine Histeresis (δ_hyst)"}
+        Sampling["Periodic Telemetry Sampler (K-token stride)"]
+        ScoreEngine["Predictive Memory Pressure Estimator: Φ_t"]
+        RegimeLogic{"Hysteresis State Machine (δ_hyst)"}
         R1["Regime 1: High-Throughput (Max Prefetch)"]
         R2["Regime 2: Balanced Offloading (turbovec 4-bit)"]
         R3["Regime 3: Ultra-Low Survival (turbovec 2-bit + Strict Streaming)"]
     end
 
-    subgraph Llama_CPP ["Mesin Inferensi: llama.cpp"]
-        MmapWeights["Model Weights GGUF (Single File via mmap)"]
-        ActiveKVCache["KV-Cache Buffer Aktif"]
-        Surgery["KV Surgery: llama_kv_cache_seq_rm dan seq_add"]
+    subgraph Llama_CPP ["Inference Backend: llama.cpp"]
+        MmapWeights["Model Weights (Unified GGUF via mmap)"]
+        ActiveKVCache["Active Physical KV-Cache Working Set"]
+        Surgery["KV Surgery: llama_kv_cache_seq_rm & seq_add"]
     end
 
-    subgraph Turbovec_Rust ["Indeks Vektor: turbovec (Rust C-ABI via FFI)"]
+    subgraph Turbovec_Rust ["Vector Index: turbovec (Rust C-ABI via FFI)"]
         FFI["turbovec-ffi (Zero-Copy Raw Pointer Bridge)"]
         TurboQuant["TurboQuant Index (Lloyd-Max Scalar Quantizer)"]
         Requantize["In-Place 4-bit -> 2-bit Requantization"]
@@ -55,52 +54,27 @@ flowchart TD
     RegimeLogic -->|θ_low < Φ_t ≤ θ_high| R2
     RegimeLogic -->|Φ_t > θ_high| R3
 
-    R1 -.->|Prefetch Layer Mendatang| KernelMadvise
-    R2 -->|Evict Token Tengah| Surgery
-    R3 -->|Trigger 2-bit dan Strict Streaming| Surgery
+    R1 -.->|Prefetch Upcoming Layer Pages| KernelMadvise
+    R2 -->|Trigger KV Eviction & Layer Streaming| Surgery
+    R3 -->|Trigger In-Place 2-bit Requantization| Requantize
 
-    Surgery -->|Pointer Float Langsung (Zero-Copy)| FFI
+    Surgery -->|Pass Pruned Token Pointer| FFI
     FFI --> TurboQuant
-    TurboQuant --> Requantize
-    SIMD -->|Selective Context Retrieval| ActiveKVCache
-    KernelMadvise -->|Evict Inactive Layer Pages| MmapWeights
+    SIMD -->|Selective Context Recall| ActiveKVCache
+
+    KernelMadvise --> MmapWeights
 ```
 
 ---
 
-## 3. Daftar Referensi Ilmiah Terverifikasi
+## 3. Directory Layout
 
-1. **Zandieh, A., Daliri, M., Hadian, M., & Mirrokni, V. (2026).** *TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate*. In *Proceedings of the International Conference on Learning Representations (ICLR 2026)*.  
-   Tautan arXiv: [https://arxiv.org/abs/2504.19874](https://arxiv.org/abs/2504.19874)  
-   Tautan Google Research: [https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
-
-2. **Codrai, R. (2026).** *turbovec: High-performance, in-process vector search index in Rust implementing Google Research's TurboQuant (ICLR 2026)*.  
-   Tautan GitHub: [https://github.com/RyanCodrai/turbovec](https://github.com/RyanCodrai/turbovec)
-
-3. **Gerganov, G., et al. (2026).** *llama.cpp: Inference of LLaMA model in pure C/C++*.  
-   Tautan GitHub: [https://github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)  
-   Diskusi dan PR Terkait TurboQuant: [Issue #20977](https://github.com/ggml-org/llama.cpp/issues/20977) dan [Pull Request #21038](https://www.google.com/search?q=https://github.com/ggml-org/llama.cpp/pull/21038)
-
-4. **Lyogavin. (2023/2024).** *AirLLM: 70B inference with single 4GB GPU (Layer-wise LLM Inference Optimization)*.  
-   Tautan GitHub: [https://github.com/lyogavin/airllm](https://github.com/lyogavin/airllm)
-
-5. **Xiao, G., Tian, Y., Chen, B., Han, S., & Lewis, M. (2024).** *Efficient Streaming Language Models with Attention Sinks (StreamingLLM)*. In *Proceedings of the International Conference on Learning Representations (ICLR 2024)*.  
-   Tautan arXiv: [https://arxiv.org/abs/2309.17453](https://arxiv.org/abs/2309.17453)
-
-6. **Zhang, Z., Sheng, Y., Zhou, T., Chen, T., Zheng, L., Cai, R., Song, Z., Tian, Y., Ré, C., Barrett, C., Wang, Z., & Chen, B. (2023).** *H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models*. In *Advances in Neural Information Processing Systems (NeurIPS 2023)*, Vol. 36.  
-   Tautan arXiv: [https://arxiv.org/abs/2306.14048](https://arxiv.org/abs/2306.14048)
-
-7. **ThinKV Authors. (2026).** *ThinKV: Thought-Adaptive KV Cache Compression for Reasoning Models*. In *Proceedings of the International Conference on Learning Representations (ICLR 2026)*.  
-   Tautan arXiv: [https://arxiv.org/abs/2510.01290](https://arxiv.org/abs/2510.01290)
-
-8. **Lethe Authors. (2026).** *Lethe: Layer-Adaptive KV Cache Eviction with Dynamic Sparsity Allocation*. In *Proceedings of the AAAI Conference on Artificial Intelligence (AAAI 2026)*.  
-   Tautan arXiv: [https://arxiv.org/abs/2511.12612](https://arxiv.org/abs/2511.12612)
-
-9. **Liu, Z., Desai, A., Liao, F., Shen, W., Xie, Z., Xu, K., Pavone, M., & Ermon, S. (2024).** *Scissorhands: Exploiting the Persistence of Importance Hypothesis for LLM KV Cache Compression*. In *Advances in Neural Information Processing Systems (NeurIPS 2024)*.  
-   Tautan arXiv: [https://arxiv.org/abs/2305.17118](https://arxiv.org/abs/2305.17118)
-
-10. **TheTom. (2026).** *llama-cpp-turboquant: Experimental TurboQuant integration in llama.cpp*.  
-    Tautan GitHub: [https://github.com/TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant)
-
-11. **AmesianX. (2026).** *TurboQuant: C++ Implementation and Exploration for Quantized Inference*.  
-    Tautan GitHub: [https://github.com/AmesianX/TurboQuant](https://github.com/AmesianX/TurboQuant)
+```text
+docs/
+├── README.md                                 # Technical documentation index
+├── 01_SYSTEM_ARCHITECTURE.md                 # Subsystem design & execution flow
+├── 02_MATHEMATICAL_MODEL_AND_CONTROLLER.md   # Formal equilibrium & predictive metric
+├── 03_TURBOVEC_FFI_SPECIFICATION.md          # C-ABI header & Rust FFI implementation
+├── 04_EXPERIMENTAL_METHODOLOGY.md            # Benchmark protocols, hardware, & metrics
+└── 05_LITERATURE_REVIEW_AND_REFERENCES.md    # Critical analysis, Data Science & citations
+```
