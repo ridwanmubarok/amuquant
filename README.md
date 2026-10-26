@@ -16,7 +16,7 @@
 Running Large Language Models (LLMs) locally on hardware with bounded physical RAM faces a fundamental operational challenge: **memory exhaustion as generation context expands**. In computer systems, physical RAM allocation during autoregressive LLM decoding is governed by two competing memory demands:
 
 1. **Static Model Weights ($M_{\text{weight}}$):** The quantized model file (e.g., GGUF format) consumes a fixed baseline of physical RAM upon initialization. When combined with operating system kernel allocations and active background tasks, the available headroom for runtime data is severely restricted before text generation begins.
-2. **Dynamic Context Memory ($M_{\text{KV}}$):** During autoregressive decoding, historical attention key-value states must be preserved in the KV-Cache. As sequence length $N$ grows through extended conversations, document ingestion, or multi-step reasoning chains, the KV-Cache expands linearly ($\mathcal{O}(N)$), consuming gigabytes of additional memory.
+2. **Dynamic Context Memory ($M_{\text{KV}}$):** During autoregressive decoding, historical attention key-value states must be preserved in the KV-Cache. As sequence length $N$ grows through extended conversations, document ingestion, or multi-step reasoning chains, the KV-Cache expands linearly in O(N), consuming gigabytes of additional memory.
 
 When aggregate memory consumption exceeds physical RAM limits, the operating system kernel is forced to swap model weight pages to secondary storage (SSD *page thrashing*). This triggers an exponential drop in generation throughput or causes sudden process termination by the OS *Out-of-Memory (OOM) Killer*.
 
@@ -24,7 +24,7 @@ Prior systems exhibit four critical systemic limitations:
 * **Layer-Streaming Neglects KV-Cache Growth:** Methods like AirLLM ([Lyogavin, 2024](https://github.com/lyogavin/airllm)) or passive `mmap` in `llama.cpp` ([Gerganov et al., 2026](https://github.com/ggml-org/llama.cpp)) stream weights layer-wise from SSD, but leave the uncompressed KV-cache in RAM, triggering OOM on extended sequences.
 * **Context Eviction Causes Permanent Information Loss (*Evict-to-Trash*):** Methods such as StreamingLLM ([Xiao et al., ICLR 2024](https://arxiv.org/abs/2309.17453)), H2O ([Zhang et al., NeurIPS 2023](https://arxiv.org/abs/2306.14048)), ThinKV ([ICLR 2026](https://arxiv.org/abs/2510.01290)), and Lethe ([AAAI 2026](https://arxiv.org/abs/2511.12612)) drop older tokens permanently, causing complete recall failure on past context while remaining blind to host OS memory telemetry.
 * **Static TurboQuant Lacks Runtime Adaptability:** Early TurboQuant integrations ([Zandieh et al., ICLR 2026](https://arxiv.org/abs/2504.19874)) in community branches ([TheTom, 2026](https://github.com/TheTom/llama-cpp-turboquant); [AmesianX, 2026](https://github.com/AmesianX/TurboQuant); [Issue #20977](https://github.com/ggml-org/llama.cpp/issues/20977); [PR #21038](https://github.com/ggml-org/llama.cpp/pull/21038)) require pre-configured bit-widths; they cannot adjust compression dynamically when available RAM fluctuates mid-generation.
-* **The turbovec Library Lacks Native C++ Integration:** The high-performance `turbovec` crate ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)) achieves $7.8\times$ (4-bit) and $15.5\times$ (2-bit) compression in microseconds via CPU SIMD, but only targets Rust and Python, lacking a zero-copy C-ABI bridge to `llama.cpp` (C++).
+* **The turbovec Library Lacks Native C++ Integration:** The high-performance `turbovec` crate ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)) achieves 7.8× (4-bit) and 15.5× (2-bit) compression in microseconds via CPU SIMD, but only targets Rust and Python, lacking a zero-copy C-ABI bridge to `llama.cpp` (C++).
 
 **AMU-QUANT** resolves this dilemma through a co-adaptive runtime memory management engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`) protected by a guaranteed **Transactional Eviction Barrier**. Concurrently, it coordinates advisory virtual memory paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model segments.
 
@@ -55,13 +55,11 @@ AMU-QUANT is architected around four cohesive systems principles designed to ena
 3. **Multi-Tier Precision Compression**:
    Archived context is managed via high-performance, non-uniform Lloyd-Max scalar quantization implemented with native SIMD acceleration (ARM NEON / AVX2):
    * **Tier 1 (FP16 Attention Buffer)**: Active recent window and attention sinks retained in physical KV memory for maximum throughput.
-   * **Tier 2 (4-bit Vector Index)**: Historical tokens compressed by $\approx 7.8\times$ with sub-millisecond cosine retrieval latency.
-   * **Tier 3 (2-bit In-Place Vector Index)**: Critical survival mode compressing historical tokens by $\approx 15.5\times$ via dynamic in-place bit-repacking under severe memory starvation.
+   * **Tier 2 (4-bit Vector Index)**: Historical tokens compressed by ~7.8× with sub-millisecond cosine retrieval latency.
+   * **Tier 3 (2-bit In-Place Vector Index)**: Critical survival mode compressing historical tokens by ~15.5× via dynamic in-place bit-repacking under severe memory starvation.
 
 4. **Cost-Benefit Decision Arbitration**:
-   The runtime decision engine coordinates multiple mitigation actions (KV pruning, vector bit-width, layer prefetch depth, and advisory OS paging) by solving a continuous utility optimization problem:
-   $$ \mathbf{a}^* = \arg\min_{\mathbf{a} \in \mathcal{A}} \left[ \text{Risk}_{\text{OOM}}(\mathbf{a}) + \lambda_{\text{lat}} \cdot \mathcal{C}_{\text{lat}}(\mathbf{a}) + \lambda_{\text{qual}} \cdot \mathcal{L}_{\text{qual}}(\mathbf{a}) \right] $$
-   This suppresses unnecessary performance degradation during safe conditions while enforcing strict memory bounds during workload spikes.
+   The runtime decision engine coordinates multiple mitigation actions (KV pruning, vector bit-width, layer prefetch depth, and advisory OS paging) by solving an online utility optimization problem $\mathbf{a}^* = \arg\min_{\mathbf{a}} \mathcal{J}(\mathbf{a})$ to balance OOM risk, adaptation latency, and semantic fidelity. This suppresses unnecessary performance degradation during safe conditions while enforcing strict memory bounds during workload spikes.
 
 ---
 
@@ -71,7 +69,7 @@ Memory contention is not specific to any single parameter scale; rather, it is a
 
 | Model Scale | Representative Architectures | Hardware Profile | Primary Memory Contention | AMU-QUANT Operational Impact |
 | :--- | :--- | :--- | :--- | :--- |
-| **Compact (< 3B)** | SmolLM2-1.7B, Qwen2.5-1.5B, Llama-3.2-3B | 4 GB – 8 GB RAM (Edge Devices, Raspberry Pi 5) | Small initial weights leave minimal margin before KV-cache expansion causes OOM. | Expands effective context window by $7.8\times$–$15.5\times$ within strict sub-4 GB ceilings. |
+| **Compact (< 3B)** | SmolLM2-1.7B, Qwen2.5-1.5B, Llama-3.2-3B | 4 GB – 8 GB RAM (Edge Devices, Raspberry Pi 5) | Small initial weights leave minimal margin before KV-cache expansion causes OOM. | Expands effective context window by 7.8× to 15.5× within strict sub-4 GB ceilings. |
 | **Medium (7B–8B)** | Llama-3/3.1-8B, Qwen2.5-7B, Mistral-7B | 8 GB – 16 GB RAM (Standard Developer Laptops) | Static weights consume 50%–70% of RAM; long-context or multi-agent tasks trigger swap thrashing. | Sustains multi-agent concurrency with zero swap thrashing and ~99% context recall. |
 | **Large (14B–32B)** | Qwen2.5-14B, Qwen2.5-32B, DeepSeek-R1-Distill-32B | 16 GB – 32 GB RAM (High-End Laptops, Mac Mini) | Models barely fit into unified RAM; even modest KV growth forces kernel page swapping. | Enables single-layer streaming with Tier-2/Tier-3 compressed episodic cache storage. |
 | **Frontier (70B+)** | Llama-3.3-70B, Qwen2.5-72B | 32 GB – 64 GB+ RAM (Workstations & Server Nodes) | Multi-turn dialogs and high-concurrency agent swarms exhaust server memory rapidly. | Prevents out-of-memory cascades during massive concurrent batching and long-horizon tasks. |
@@ -127,9 +125,9 @@ Nominal parameters: $\beta = 0.25$, $\gamma = 0.15$, and $\tau_{\text{horizon}} 
 * **Regime 1: High-Throughput Caching ($\Phi_t \le \theta_{\text{low}}$)**  
   Maximizes layer prefetching in RAM ($|\mathcal{L}_{\text{resident}}| \gg 1$). Full uncompressed FP16 KV-cache is retained for maximum throughput.
 * **Regime 2: Balanced Offloading ($\theta_{\text{low}} < \Phi_t \le \theta_{\text{high}}$)**  
-  Middle tokens excised from physical KV-cache and archived to `turbovec` 4-bit ($\approx 7.8\times$ compression). Slower layers are evicted via `posix_madvise(..., POSIX_MADV_DONTNEED)`. Prefetch depth throttled to 1 layer.
+  Middle tokens excised from physical KV-cache and archived to `turbovec` 4-bit (~7.8× compression). Slower layers are evicted via `posix_madvise(..., POSIX_MADV_DONTNEED)`. Prefetch depth throttled to 1 layer.
 * **Regime 3: Ultra-Low Memory Survival ($\Phi_t > \theta_{\text{high}}$)**  
-  In-place requantization of the `turbovec` index from 4-bit to 2-bit ($\approx 15.5\times$ compression). Enforces strict single-layer execution (prefetch depth = 0) with sub-0.25 ms SIMD cosine recall.
+  In-place requantization of the `turbovec` index from 4-bit to 2-bit (~15.5× compression). Enforces strict single-layer execution (prefetch depth = 0) with sub-0.25 ms SIMD cosine recall.
 
 ### 3.4 Predictive Cost-Benefit Multi-Action Arbitration Policy (PCBM-Policy)
 
@@ -145,30 +143,43 @@ $$
 \mathcal{J}(\mathbf{a}) = \text{Risk}_{\text{OOM}}(\mathbf{a};\,\widehat{M}(t+\tau_{\text{horizon}})) + \lambda_{\text{lat}} \cdot \mathcal{C}_{\text{lat}}(\mathbf{a}) + \lambda_{\text{qual}} \cdot \mathcal{L}_{\text{qual}}(\mathbf{a})
 $$
 
-1. **Projected Memory Deficit and OOM Risk**:
-   The controller projects process RSS and available host RAM over temporal lookahead horizon $\tau_{\text{horizon}} = 2.0\text{ s}$:
-   $$
-   \widehat{M}_{\text{proc}}(t+\tau) = M_{\text{proc}}(t) + \dot{M}_{\text{proc}}(t) \cdot \tau_{\text{horizon}} - \Delta M_{\text{reclaimed}}(\mathbf{a})
-   $$
-   $$
-   \Delta_{\text{deficit}}(\mathbf{a}) = \widehat{M}_{\text{proc}}(t+\tau) - M_{\text{limit}}
-   $$
-   If $\Delta_{\text{deficit}} > 0$, the OOM risk dominates all other terms:
-   $$
-   \text{Risk}_{\text{OOM}}(\mathbf{a}) = \text{Penalty}_{\text{OOM}} \cdot \left(\frac{\Delta_{\text{deficit}}}{M_{\text{limit}}}\right), \quad \text{Penalty}_{\text{OOM}} = 10.0
-   $$
+#### Term 1: Projected Memory Deficit and OOM Risk
 
-2. **Adaptation Latency Cost ($\mathcal{C}_{\text{lat}}$)**:
-   Measures computational overhead of each candidate mitigation action relative to token generation:
-   * $\mathbf{a}_0$ (Nominal): $\mathcal{C}_{\text{lat}} = 0.0$
-   * $\mathbf{a}_1$ (Balanced 4-bit): $\mathcal{C}_{\text{lat}} = 0.05$ (Sub-millisecond SIMD quantization)
-   * $\mathbf{a}_2$ (Survival 2-bit): $\mathcal{C}_{\text{lat}} = 0.20$ (Vector requantization + single-layer paging stall)
+The controller projects process RSS and available host RAM over temporal lookahead horizon $\tau_{\text{horizon}} = 2.0\text{ s}$:
 
-3. **Semantic Quality Loss ($\mathcal{L}_{\text{qual}}$)**:
-   Models expected information degradation from vector downscaling:
-   * $\mathbf{a}_0$ (FP16 Attention): $\mathcal{L}_{\text{qual}} = 0.0$
-   * $\mathbf{a}_1$ (4-bit Lloyd-Max): $\mathcal{L}_{\text{qual}} \approx 0.14$ (Cosine match $\approx 0.86$)
-   * $\mathbf{a}_2$ (2-bit Lloyd-Max): $\mathcal{L}_{\text{qual}} \approx 0.20$ (Cosine match $\approx 0.80$)
+$$
+\widehat{M}_{\text{proc}}(t+\tau) = M_{\text{proc}}(t) + \dot{M}_{\text{proc}}(t) \cdot \tau_{\text{horizon}} - \Delta M_{\text{reclaimed}}(\mathbf{a})
+$$
+
+$$
+\Delta_{\text{deficit}}(\mathbf{a}) = \widehat{M}_{\text{proc}}(t+\tau) - M_{\text{limit}}
+$$
+
+If $\Delta_{\text{deficit}} > 0$, the OOM risk dominates all other terms:
+
+$$
+\text{Risk}_{\text{OOM}}(\mathbf{a}) = \text{Penalty}_{\text{OOM}} \cdot \left(\frac{\Delta_{\text{deficit}}}{M_{\text{limit}}}\right), \quad \text{Penalty}_{\text{OOM}} = 10.0
+$$
+
+#### Term 2: Adaptation Latency Cost (C_lat)
+
+Measures computational overhead of each candidate mitigation action relative to token generation:
+
+| Candidate Action | Allocation Mode | Latency Cost $\mathcal{C}_{\text{lat}}$ | Operational Characteristics |
+| :--- | :--- | :---: | :--- |
+| $\mathbf{a}_0$ | Nominal (Full KV) | $0.00$ | Baseline generation without pruning |
+| $\mathbf{a}_1$ | Balanced (4-bit) | $0.05$ | Sub-millisecond SIMD quantization |
+| $\mathbf{a}_2$ | Survival (2-bit) | $0.20$ | Dynamic requantization + paging stall |
+
+#### Term 3: Semantic Quality Loss (L_qual)
+
+Models expected information degradation from vector downscaling:
+
+| Candidate Action | Attention State | Quality Loss $\mathcal{L}_{\text{qual}}$ | Cosine Similarity Fidelity |
+| :--- | :--- | :---: | :---: |
+| $\mathbf{a}_0$ | FP16 Attention | $0.00$ | $1.0000$ (Lossless) |
+| $\mathbf{a}_1$ | 4-bit Lloyd-Max | $0.14$ | $\approx 0.8605$ |
+| $\mathbf{a}_2$ | 2-bit Lloyd-Max | $0.20$ | $\approx 0.8000$ |
 
 By solving $\arg\min_{\mathbf{a}} \mathcal{J}(\mathbf{a})$ at runtime, the engine strictly suppresses unneeded precision downscaling when headroom is safe, while pre-emptively triggering deep compression before physical RAM exhaustion occurs. Both policies are selectable at initialization via `AMUQuantConfig::policy`:
 * `ArbitrationPolicy::PREDICTIVE_COST_BENEFIT` (Utility-optimizing lookahead controller)
@@ -301,7 +312,7 @@ Logical KV-Cache Capacity Reclaimed:
 
 ### 5.2 Scenario 2: Multi-Turn Autonomous Agentic Workflow (ReAct Tool Loop)
 
-In autonomous LLM agent frameworks (e.g. LangChain, AutoGen, CrewAI, and coding/audit agents), an agent executes a multi-step reasoning loop (User request -> Tool call -> Large observation payload -> Synthesis). In unmanaged runtimes, cumulative context from repeated tool outputs inflates physical attention buffers linearly ($\mathcal{O}(N)$), rapidly triggering OOM or severe slowdowns.
+In autonomous LLM agent frameworks (e.g. LangChain, AutoGen, CrewAI, and coding/audit agents), an agent executes a multi-step reasoning loop (User request -> Tool call -> Large observation payload -> Synthesis). In unmanaged runtimes, cumulative context from repeated tool outputs inflates physical attention buffers linearly in O(N), rapidly triggering OOM or severe slowdowns.
 
 AMU-QUANT solves this by autonomously excising older tool observation representations from physical KV slots, archiving them into `turbovec` (4-bit/2-bit Lloyd-Max) with zero-copy SIMD recall:
 
@@ -383,7 +394,7 @@ To isolate the contribution of AMU-QUANT's decision engine, this scenario benchm
 
 ### 5.6 Scenario 5: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 
-On short horizons ($N < 100$ tokens), unmanaged baselines appear marginally faster because the unmanaged KV-cache fits into GPU L2/SLC cache. As context depth expands beyond the **Crossover Point ($N^* \approx 180$ tokens)**, unmanaged baseline memory explodes linearly ($\mathcal{O}(N)$), while AMU-QUANT bounds physical KV memory to $\approx 4.71\text{ MB}$ ($\mathcal{O}(1)$ attention complexity):
+On short horizons ($N < 100$ tokens), unmanaged baselines appear marginally faster because the unmanaged KV-cache fits into GPU L2/SLC cache. As context depth expands beyond the **Crossover Point ($N^* \approx 180$ tokens)**, unmanaged baseline memory explodes linearly in O(N), while AMU-QUANT bounds physical KV memory to ~4.71 MB with bounded O(1) attention complexity:
 
 | Context Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
 | :--- | :--- | :--- | :--- | :--- |
