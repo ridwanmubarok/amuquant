@@ -120,7 +120,7 @@ bool GGUFParser::parse_file(const std::string& filepath, GGUFModelInfo& out_info
         f.read(reinterpret_cast<char*>(&t.type), sizeof(t.type));
         f.read(reinterpret_cast<char*>(&t.offset), sizeof(t.offset));
 
-        // Parsing layer index dari nama tensor (misal: "blk.0.attn_q.weight")
+        // Extract transformer block layer index from tensor identifier (e.g. "blk.0.attn_q.weight")
         std::smatch match;
         if (std::regex_search(t.name, match, block_regex) && match.size() > 1) {
             t.layer_idx = std::stoi(match[1].str());

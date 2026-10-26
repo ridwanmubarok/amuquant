@@ -1,3 +1,8 @@
+/**
+ * @file kv_surgeon.hpp
+ * @brief Dynamic KV-cache eviction-to-index surgery and RoPE positional realignment.
+ */
+
 #ifndef AMUQUANT_KV_SURGEON_HPP
 #define AMUQUANT_KV_SURGEON_HPP
 
@@ -33,8 +38,14 @@ public:
     KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim);
     ~KVSurgeon() = default;
 
+    /**
+     * @brief Computes middle-token eviction bounds preserving initial sink tokens and recent window.
+     */
     EvictionRange plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window) const;
 
+    /**
+     * @brief Extracts candidate KV tokens into TurboQuant index, prunes cache sequence, and applies RoPE delta.
+     */
     bool execute_eviction(
         const EvictionRange& range,
         const KVVectorExtractor& extractor,
@@ -42,6 +53,9 @@ public:
         const KVSeqAddFunc& seq_add
     );
 
+    /**
+     * @brief Returns active KV and compressed index memory metrics.
+     */
     KVSurgeryStats get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim) const;
 
     void reset();

@@ -31,7 +31,7 @@ bool KVSurgeon::execute_eviction(
         return false;
     }
 
-    // 1. Ekstraksi vektor token tengah dan simpan ke turbovec via zero-copy FFI
+    // 1. Extract middle-token representations into TurboQuant index
     for (int32_t pos = range.p_start; pos < range.p_end; ++pos) {
         const float* vec_ptr = extractor(pos);
         if (vec_ptr != nullptr) {
@@ -40,12 +40,12 @@ bool KVSurgeon::execute_eviction(
         }
     }
 
-    // 2. Pemotongan sequence pada KV-Cache fisik
+    // 2. Prune physical KV sequence slot range
     if (seq_rm) {
         seq_rm(range.p_start, range.p_end);
     }
 
-    // 3. Pergeseran offset RoPE untuk menutup celah posisi
+    // 3. Apply RoPE positional shift to close the sequence gap
     int32_t shift_delta = -(range.p_end - range.p_start);
     if (seq_add) {
         seq_add(range.p_end, -1, shift_delta);
@@ -61,8 +61,7 @@ KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint
     stats.archived_chunks = total_archived_tokens_;
     stats.current_rope_shift = cumulative_rope_shift_;
 
-    // Perhitungan ukuran KV-cache fisik (format FP16 = 2 byte per elemen)
-    // Memory per token = 2 * num_layers * kv_heads * head_dim * sizeof(fp16)
+    // Physical FP16 KV-cache memory: 2 * num_layers * kv_heads * head_dim * sizeof(uint16_t)
     size_t bytes_per_token = 2ULL * num_layers * kv_heads * head_dim * sizeof(uint16_t);
     stats.kv_memory_bytes = active_tokens_ * bytes_per_token;
 

@@ -1,3 +1,8 @@
+/**
+ * @file engine.hpp
+ * @brief Unified AMU-QUANT runtime engine coordinating layers, telemetry, and KV surgery.
+ */
+
 #ifndef AMUQUANT_ENGINE_HPP
 #define AMUQUANT_ENGINE_HPP
 
@@ -30,12 +35,25 @@ public:
     explicit AMUQuantEngine(const AMUQuantConfig& config);
     ~AMUQuantEngine();
 
+    /**
+     * @brief Initializes subcomponents, allocates the TurboQuant vector index, and tests telemetry.
+     */
     Status initialize();
 
+    /**
+     * @brief Registers an mmap-backed weight slice for a transformer layer.
+     */
     void register_layer(uint32_t layer_idx, void* addr, size_t size_bytes);
+
+    /**
+     * @brief Hooks invoked around layer forward passes for prefetching and page eviction.
+     */
     void begin_layer_forward(uint32_t layer_idx);
     void end_layer_forward(uint32_t layer_idx);
 
+    /**
+     * @brief Periodic token generation step hook driving KV eviction and regime arbitration.
+     */
     StepDecision step_token(
         uint32_t token_step,
         uint32_t current_seq_len,
@@ -44,7 +62,11 @@ public:
         const KVSeqAddFunc& seq_add
     );
 
+    /**
+     * @brief Queries the compressed TurboQuant vector index for evicted context chunks.
+     */
     std::vector<SearchResult> recall_context(const float* query_data, uint32_t top_k);
+
     EngineMetrics get_metrics() const;
 
     TurbovecIndexHandle* get_turbovec_handle() { return turbovec_handle_; }

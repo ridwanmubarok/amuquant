@@ -15,7 +15,7 @@ int main() {
     cfg.memory_limit_bytes = 14ULL * 1024ULL * 1024ULL * 1024ULL; // 14 GB Safe Limit
     cfg.os_reserved_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
     cfg.num_layers = 32;
-    cfg.embedding_dim = 1024; // Gunakan 1024-dim untuk simulasi cepat
+    cfg.embedding_dim = 1024; // 1024-dim embedding for fast pipeline verification
     cfg.eval_interval_tokens = 4;
     cfg.recent_window_tokens = 32;
     cfg.min_recent_window_tokens = 16;
@@ -26,19 +26,19 @@ int main() {
     assert(st == Status::OK);
     std::cout << "  - Engine initialized: OK" << std::endl;
 
-    // 1. Simulasikan alokasi mmap untuk 32 layer model
-    constexpr size_t LAYER_SIZE = 128 * 1024 * 1024; // 128 MB per layer (~4 GB total model)
+    // 1. Register mmap-backed weight descriptors for 32 transformer layers
+    constexpr size_t LAYER_SIZE = 128 * 1024 * 1024; // 128 MB per layer
     std::vector<std::vector<uint8_t>> simulated_layer_buffers(cfg.num_layers, std::vector<uint8_t>(4096, 0));
     for (uint32_t l = 0; l < cfg.num_layers; ++l) {
         engine.register_layer(l, simulated_layer_buffers[l].data(), LAYER_SIZE);
     }
     std::cout << "  - Registered 32 model layers: OK" << std::endl;
 
-    // 2. Siapkan token embedding buffer untuk melacak konteks
+    // 2. Prepare context token embedding buffer
     constexpr uint32_t TOTAL_STEPS = 120;
     std::vector<std::vector<float>> context_tokens(TOTAL_STEPS, std::vector<float>(cfg.embedding_dim, 0.0f));
 
-    // Masukkan "Needle" fakta unik pada token ke-15 menggunakan vektor acak unik
+    // Plant synthetic "Needle" fact vector at step 15
     constexpr uint32_t NEEDLE_POS = 15;
     std::mt19937 needle_rng(9999);
     std::normal_distribution<float> needle_dist(0.0f, 1.0f);
@@ -60,31 +60,30 @@ int main() {
 
     auto seq_add = [](int32_t, int32_t, int32_t) {};
 
-    // 3. Jalankan loop pembuatan token autoregresif
+    // 3. Autoregressive token generation loop
     auto telemetry = engine.get_telemetry();
     telemetry->set_mock_mode(true);
 
     for (uint32_t t = 0; t < TOTAL_STEPS; ++t) {
-        // Simulasikan forward pass layer demi layer
+        // Forward pass layer iteration
         for (uint32_t l = 0; l < cfg.num_layers; ++l) {
             engine.begin_layer_forward(l);
-            // Komputasi layer selesai
             engine.end_layer_forward(l);
         }
 
-        // Simulasikan kenaikan memori: normal di awal, lalu melonjak di t = 40
+        // Simulate memory ramp-up: nominal at start, rising at t=40, critical at t=80
         MemoryStats s{};
-        s.timestamp_sec = 10.0 + (t * 0.5); // Waktu bertambah bertahap
+        s.timestamp_sec = 10.0 + (t * 0.5);
         if (t < 40) {
-            s.process_rss_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL; // 4 GB (~33% Safe Limit -> Regime 1)
+            s.process_rss_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL; // Nominal -> Regime 1
         } else if (t < 80) {
-            s.process_rss_bytes = static_cast<uint64_t>(12ULL * 1024ULL * 1024ULL * 1024ULL * 0.72); // 72% Safe Limit -> Regime 2
+            s.process_rss_bytes = static_cast<uint64_t>(12ULL * 1024ULL * 1024ULL * 1024ULL * 0.72); // Moderate -> Regime 2
         } else {
-            s.process_rss_bytes = static_cast<uint64_t>(12ULL * 1024ULL * 1024ULL * 1024ULL * 0.92); // 92% Safe Limit -> Regime 3 Kritis
+            s.process_rss_bytes = static_cast<uint64_t>(12ULL * 1024ULL * 1024ULL * 1024ULL * 0.92); // Critical -> Regime 3
         }
         telemetry->set_mock_stats(s);
 
-        // Buat representasi vektor untuk token t jika belum ada
+        // Populate context token embedding if not the needle token
         if (t != NEEDLE_POS) {
             std::mt19937 bg_rng(100 + t);
             std::normal_distribution<float> bg_dist(0.0f, 1.0f);
@@ -93,7 +92,7 @@ int main() {
             }
         }
 
-        // Eksekusi step kontroler AMU-QUANT
+        // Execute AMU-QUANT controller arbitration step
         StepDecision dec = engine.step_token(t, t + 1, extractor, seq_rm, seq_add);
 
         if (t == 50) {
@@ -109,7 +108,7 @@ int main() {
     std::cout << "  - Total tokens pruned and archived to turbovec: " << pruned_count << std::endl;
     assert(pruned_count > 0);
 
-    // 4. Uji Pengambilan Kembali Fakta Jarum (Needle-in-a-Haystack Retrieval)
+    // 4. Test Needle-in-a-Haystack context retrieval
     auto results = engine.recall_context(context_tokens[NEEDLE_POS].data(), 3);
     assert(!results.empty());
     std::cout << "  - Context Recall Top-1 Chunk ID: " << results[0].id
@@ -118,7 +117,7 @@ int main() {
     assert(results[0].score > 0.85f);
     std::cout << "  - Needle-in-a-Haystack Recall verified successfully!" << std::endl;
 
-    // 5. Verifikasi Metrik Engine
+    // 5. Verify Engine Telemetry Metrics
     EngineMetrics m = engine.get_metrics();
     std::cout << "  - Avg Inter-Token Latency: " << m.avg_inter_token_latency_ms << " ms" << std::endl;
     std::cout << "  - Peak RSS: " << (m.peak_rss_bytes / (1024 * 1024)) << " MB" << std::endl;

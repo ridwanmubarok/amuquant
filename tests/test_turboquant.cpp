@@ -15,14 +15,14 @@ int main() {
     constexpr uint32_t DIM = 4096;
     constexpr uint32_t NUM_VECTORS = 100;
 
-    // 1. Inisialisasi indeks via C-ABI
+    // 1. Initialize TurboQuant index via C-ABI
     TurbovecIndexHandle* handle = nullptr;
     TurbovecStatus st = turbovec_init(DIM, 4, &handle);
     assert(st == TURBOVEC_STATUS_OK);
     assert(handle != nullptr);
     std::cout << "  - turbovec_init: OK" << std::endl;
 
-    // 2. Buat vektor uji deterministik
+    // 2. Generate deterministic synthetic embedding vectors
     std::vector<std::vector<float>> test_vectors(NUM_VECTORS, std::vector<float>(DIM));
     for (uint32_t i = 0; i < NUM_VECTORS; ++i) {
         for (uint32_t d = 0; d < DIM; ++d) {
@@ -30,20 +30,20 @@ int main() {
         }
     }
 
-    // 3. Uji penyisipan Zero-Copy
+    // 3. Test zero-copy vector insertion
     for (uint32_t i = 0; i < NUM_VECTORS; ++i) {
         st = turbovec_insert_zero_copy(handle, i, test_vectors[i].data(), DIM);
         assert(st == TURBOVEC_STATUS_OK);
     }
     std::cout << "  - turbovec_insert_zero_copy (" << NUM_VECTORS << " vectors): OK" << std::endl;
 
-    // 4. Periksa penggunaan memori
+    // 4. Verify heap memory footprint
     size_t mem_bytes_4bit = 0;
     st = turbovec_get_memory_usage(handle, &mem_bytes_4bit);
     assert(st == TURBOVEC_STATUS_OK);
     std::cout << "  - Memory usage (4-bit mode): " << (mem_bytes_4bit / 1024) << " KB" << std::endl;
 
-    // 5. Uji latensi dan akurasi pencarian SIMD
+    // 5. Test SIMD search latency and retrieval accuracy
     constexpr uint32_t TARGET_QUERY_IDX = 42;
     std::vector<uint64_t> out_ids(5);
     std::vector<float> out_scores(5);
@@ -56,26 +56,26 @@ int main() {
     assert(count == 5);
 
     double search_latency_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    std::cout << "  - SIMD Search Latency: " << search_latency_ms << " ms (Target: < 0.25 ms)" << std::endl;
-    assert(search_latency_ms < 1.0); // Verifikasi di bawah 1 ms (bahkan jauh di bawah 0.25 ms)
+    std::cout << "  - SIMD Search Latency: " << search_latency_ms << " ms" << std::endl;
+    assert(search_latency_ms < 1.0); // Sub-millisecond retrieval check
 
-    // Vektor target harus berada di peringkat 1 (kemiripan tertinggi)
+    // Verify target vector ranks Top-1 with high cosine fidelity
     assert(out_ids[0] == TARGET_QUERY_IDX);
-    assert(out_scores[0] > 0.85f); // Skor kosinus tinggi setelah kuantisasi
+    assert(out_scores[0] > 0.85f);
     std::cout << "  - Top-1 Match Chunk ID: " << out_ids[0] << ", Cosine Score: " << out_scores[0] << " (OK)" << std::endl;
 
-    // 6. Uji Rekuantisasi In-Place ke 2-bit
+    // 6. Test in-place requantization from 4-bit to 2-bit
     st = turbovec_requantize_to_2bit(handle);
     assert(st == TURBOVEC_STATUS_OK);
     std::cout << "  - turbovec_requantize_to_2bit: OK" << std::endl;
 
-    // Uji pencarian kembali setelah kompresi 2-bit
+    // Verify search fidelity preserved after 2-bit compression
     st = turbovec_search_simd(handle, test_vectors[TARGET_QUERY_IDX].data(), 5, out_ids.data(), out_scores.data(), &count);
     assert(st == TURBOVEC_STATUS_OK);
-    assert(out_ids[0] == TARGET_QUERY_IDX); // Tetap mempertahankan peringkat teratas
+    assert(out_ids[0] == TARGET_QUERY_IDX);
     std::cout << "  - Top-1 Match after 2-bit Requantization: " << out_ids[0] << " (Score: " << out_scores[0] << ") (OK)" << std::endl;
 
-    // 7. Bersihkan memori indeks
+    // 7. Release index memory
     st = turbovec_free(handle);
     assert(st == TURBOVEC_STATUS_OK);
     std::cout << "  - turbovec_free: OK" << std::endl;

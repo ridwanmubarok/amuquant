@@ -30,20 +30,20 @@ double AMUQuantController::compute_phi_score(
                           (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
     if (safe_limit == 0) return 0.0;
 
-    // 1. Rasio Utilisasi Memori Absolut [0.0, 1.0+]
+    // 1. Instantaneous memory utilization ratio relative to safe budget
     double utilization = static_cast<double>(current_stats.process_rss_bytes) / static_cast<double>(safe_limit);
 
-    // 2. Laju Pertumbuhan Diferensial diproyeksikan ke Horizon Waktu Masa Depan
-    double dt = std::max(elapsed_sec, 0.05); // Minimal 50 ms untuk stabilisasi derivatif
+    // 2. Projected memory expansion rate over horizon window tau
+    double dt = std::max(elapsed_sec, 0.05); // Numerical guard against near-zero delta time
     double dM_dt = delta_rss_bytes / dt;
     double projected_growth = (dM_dt * config_.tau_horizon_sec) / static_cast<double>(safe_limit);
     
-    // Pertumbuhan hanya memperberat risiko jika bernilai positif
+    // Growth velocity only penalizes when positive
     projected_growth = std::max(projected_growth, 0.0);
-    // Batas saturasi pertumbuhan derivatif untuk mencegah jitter numerik instan
+    // Clamp growth penalty to [0.0, 1.0] to dampen transient allocation spikes
     projected_growth = std::min(projected_growth, 1.0);
 
-    // 3. Skor Tekanan Prediktif: Utilisasi dasar ditambah penalti akselerasi memori
+    // 3. Predictive pressure metric: instantaneous baseline + growth rate penalty
     double phi = utilization + (config_.beta * projected_growth);
     return phi;
 }
@@ -61,7 +61,7 @@ StepDecision AMUQuantController::on_token_step(
     decision.aggressive_evict = aggressive_evict_;
     decision.phi_score = last_phi_;
 
-    // Evaluasi hanya dilakukan setiap K token
+    // Sample telemetry at scheduled token stride
     if (token_step % config_.eval_interval_tokens != 0 && !first_eval_) {
         return decision;
     }
@@ -76,12 +76,12 @@ StepDecision AMUQuantController::on_token_step(
     last_eval_rss_ = stats.process_rss_bytes;
     first_eval_ = false;
 
-    // Hitung Skor Tekanan Prediktif Φ_t
+    // Evaluate predictive pressure score Phi_t
     double phi = compute_phi_score(stats, elapsed_sec, delta_rss);
     last_phi_ = phi;
     decision.phi_score = phi;
 
-    // Evaluasi Mesin Keadaan (State Machine) dengan Histeresis
+    // Hysteresis-guarded finite state machine evaluation
     Regime target_regime = current_regime_;
 
     switch (current_regime_) {
@@ -140,7 +140,7 @@ void AMUQuantController::apply_regime_transition(
             decision.prefetch_depth = 1;
             decision.aggressive_evict = true;
 
-            // Pangkas token tengah dan simpan ke turbovec
+            // Evict middle tokens to compressed TurboQuant index
             if (kv_surgeon_) {
                 auto range = kv_surgeon_->plan_eviction(
                     current_seq_len,
@@ -161,14 +161,14 @@ void AMUQuantController::apply_regime_transition(
             decision.prefetch_depth = 0;
             decision.aggressive_evict = true;
 
-            // Rekuantisasi in-place ke 2-bit jika masih 4-bit
+            // In-place requantization to 2-bit representation
             if (current_bit_width_ == 4 && turbovec_idx_ != nullptr) {
                 turbovec_requantize_to_2bit(turbovec_idx_);
                 current_bit_width_ = 2;
                 decision.requantized_to_2bit = true;
             }
 
-            // Pangkas KV dengan batas jendela yang dipersempit ekstrem
+            // Evict KV tokens under compressed recent window
             if (kv_surgeon_) {
                 auto range = kv_surgeon_->plan_eviction(
                     current_seq_len,

@@ -22,7 +22,7 @@ void LayerManager::on_layer_forward_begin(uint32_t layer_idx, uint32_t prefetch_
     layers_[layer_idx].is_resident = true;
     resident_layers_.insert(layer_idx);
 
-    // Prefetch layer mendatang sesuai kedalaman prefetch_depth
+    // Prefetch upcoming layers according to scheduled prefetch depth
     for (uint32_t d = 1; d <= prefetch_depth; ++d) {
         uint32_t target_idx = layer_idx + d;
         if (target_idx < layers_.size()) {

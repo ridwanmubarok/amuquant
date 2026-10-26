@@ -16,8 +16,8 @@ namespace amuquant {
 
 namespace {
 
-// Konstanta Centroid Lloyd-Max untuk Distribusi Normal Standar N(0, 1)
-// 4-bit (16 tingkatan)
+// Lloyd-Max optimal centroids for standard normal distribution N(0, 1)
+// 4-bit codebook (16 levels)
 const float LLOYD_MAX_4BIT_CENTROIDS[16] = {
     -2.733f, -2.069f, -1.618f, -1.256f,
     -0.942f, -0.657f, -0.388f, -0.128f,
@@ -25,7 +25,7 @@ const float LLOYD_MAX_4BIT_CENTROIDS[16] = {
      1.256f,  1.618f,  2.069f,  2.733f
 };
 
-// 2-bit (4 tingkatan)
+// 2-bit codebook (4 levels)
 const float LLOYD_MAX_2BIT_CENTROIDS[4] = {
     -1.510f, -0.453f, 0.453f, 1.510f
 };
@@ -53,24 +53,24 @@ void TurboQuantEngine::init_codebooks() {
 }
 
 void TurboQuantEngine::generate_orthogonal_matrix() {
-    // Menghasilkan matriks rotasi blok ortogonal deterministik (Blok ukuran B=64)
-    // Blok ortogonal menjamin sifat Teorema Batas Pusat (CLT) dengan komputasi O(d * B)
+    // Block-orthogonal random rotation matrix with block size B=64.
+    // Guarantees Gaussianization via Central Limit Theorem with O(d * B) projection complexity.
     constexpr size_t BLOCK_SIZE = 64;
     size_t num_blocks = (dimension_ + BLOCK_SIZE - 1) / BLOCK_SIZE;
     orthogonal_matrix_.resize(num_blocks * BLOCK_SIZE * BLOCK_SIZE);
 
-    std::mt19937 rng(42); // Seed deterministik
+    std::mt19937 rng(42); // Deterministic seed
     std::normal_distribution<float> norm_dist(0.0f, 1.0f);
 
     for (size_t b = 0; b < num_blocks; ++b) {
         float* block = &orthogonal_matrix_[b * BLOCK_SIZE * BLOCK_SIZE];
 
-        // 1. Inisialisasi matriks Gaussian acak untuk blok b
+        // 1. Generate Gaussian i.i.d. entries for block b
         for (size_t i = 0; i < BLOCK_SIZE * BLOCK_SIZE; ++i) {
             block[i] = norm_dist(rng);
         }
 
-        // 2. Gram-Schmidt Orthogonalization untuk membuat matriks ortogonal murni (Q^T * Q = I)
+        // 2. Gram-Schmidt orthogonalization ensuring Q^T * Q = I
         for (size_t i = 0; i < BLOCK_SIZE; ++i) {
             float* vi = block + i * BLOCK_SIZE;
             for (size_t j = 0; j < i; ++j) {
@@ -84,7 +84,7 @@ void TurboQuantEngine::generate_orthogonal_matrix() {
                 }
             }
 
-            // Normalisasi vektor
+            // Normalize row vector
             float norm_sq = 0.0f;
             for (size_t k = 0; k < BLOCK_SIZE; ++k) {
                 norm_sq += vi[k] * vi[k];
@@ -155,7 +155,7 @@ void TurboQuantEngine::insert(uint64_t chunk_id, const float* data, size_t len) 
         return;
     }
 
-    // 1. Hitung L2-Norm dari vektor masukan
+    // 1. Compute input vector L2-norm
     float norm_sq = 0.0f;
     for (size_t i = 0; i < len; ++i) {
         norm_sq += data[i] * data[i];
@@ -164,17 +164,17 @@ void TurboQuantEngine::insert(uint64_t chunk_id, const float* data, size_t len) 
     float sigma = (norm > 1e-12f) ? (norm / std::sqrt(static_cast<float>(dimension_))) : 1e-6f;
     float inv_sigma = 1.0f / sigma;
 
-    // 2. Terapkan rotasi ortogonal acak
+    // 2. Project through block-orthogonal rotation
     std::vector<float> rotated(dimension_);
     rotate_vector(data, rotated.data());
 
-    // 3. Kuantisasi skalar Lloyd-Max dan pengepakan bit
+    // 3. Lloyd-Max scalar quantization and nibble packing
     QuantizedVector qv;
     qv.chunk_id = chunk_id;
     qv.norm = norm;
 
     if (bit_width_ == 4) {
-        // Mode 4-bit: 2 komponen per byte (d/2 byte)
+        // 4-bit mode: 2 nibbles per byte (d/2 bytes per vector)
         qv.packed_data.resize(dimension_ / 2);
         for (size_t i = 0; i < dimension_; i += 2) {
             float z0 = rotated[i] * inv_sigma;
@@ -186,7 +186,7 @@ void TurboQuantEngine::insert(uint64_t chunk_id, const float* data, size_t len) 
             qv.packed_data[i / 2] = (code0 & 0x0F) | ((code1 & 0x0F) << 4);
         }
     } else {
-        // Mode 2-bit: 4 komponen per byte (d/4 byte)
+        // 2-bit mode: 4 dibits per byte (d/4 bytes per vector)
         qv.packed_data.resize(dimension_ / 4);
         for (size_t i = 0; i < dimension_; i += 4) {
             uint8_t byte_val = 0;
@@ -228,7 +228,7 @@ std::vector<SearchResult> TurboQuantEngine::search_simd(const float* query_data,
         return {};
     }
 
-    // Menggunakan min-heap untuk melacak Top-K hasil terbesar
+    // Min-heap to maintain Top-K candidates
     auto comp = [](const SearchResult& a, const SearchResult& b) {
         return a.score > b.score; // min-heap
     };
@@ -283,23 +283,22 @@ std::vector<SearchResult> TurboQuantEngine::search_simd(const float* query_data,
         results.push_back(min_heap.top());
         min_heap.pop();
     }
-    std::reverse(results.begin(), results.end()); // Urutkan dari skor tertinggi
+    std::reverse(results.begin(), results.end()); // Descending order by score
     return results;
 }
 
 void TurboQuantEngine::requantize_to_2bit() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (bit_width_ == 2) {
-        return; // Sudah dalam presisi 2-bit
+        return; // Already operating in 2-bit precision
     }
 
-    // Mengonversi secara in-place: setiap dua kode 4-bit diremapping ke satu kode 2-bit
-    // 4 kode 4-bit (2 byte) dipadatkan menjadi 4 kode 2-bit (1 byte)
+    // In-place codebook downscaling: maps two 4-bit nibbles into one 2-bit pair
+    // 4 nibbles (2 bytes) compress into 4 dibits (1 byte)
     for (auto& vec : vectors_) {
         std::vector<uint8_t> new_packed(dimension_ / 4);
 
         for (size_t i = 0; i < dimension_; i += 4) {
-            // Ambil 4 kode 4-bit dari packed_data lama
             uint8_t b0 = vec.packed_data[i / 2];
             uint8_t b1 = vec.packed_data[(i + 2) / 2];
 
@@ -308,7 +307,7 @@ void TurboQuantEngine::requantize_to_2bit() {
             uint8_t q4_2 = b1 & 0x0F;
             uint8_t q4_3 = (b1 >> 4) & 0x0F;
 
-            // Pemetaan langsung: q2 = q4 / 4
+            // Direct partition mapping: q2 = q4 / 4
             uint8_t q2_0 = q4_0 / 4;
             uint8_t q2_1 = q4_1 / 4;
             uint8_t q2_2 = q4_2 / 4;

@@ -1,3 +1,8 @@
+/**
+ * @file telemetry.hpp
+ * @brief Platform-native memory and swap telemetry sampler.
+ */
+
 #ifndef AMUQUANT_TELEMETRY_HPP
 #define AMUQUANT_TELEMETRY_HPP
 
@@ -11,17 +16,17 @@ public:
     ~SystemTelemetry() = default;
 
     /**
-     * @brief Mengambil sampel metrik memori host OS dan proses secara instan.
+     * @brief Queries instantaneous host OS memory, swap utilization, and process RSS.
      */
     MemoryStats sample();
 
     /**
-     * @brief Mengambil waktu saat ini dalam detik resolusi tinggi.
+     * @brief Monotonic high-resolution timestamp in fractional seconds.
      */
     static double get_time_seconds();
 
     /**
-     * @brief Mode injeksi pengujian sintetik.
+     * @brief Injects synthetic metrics for deterministic unit testing.
      */
     void set_mock_mode(bool enable);
     void set_mock_stats(const MemoryStats& stats);

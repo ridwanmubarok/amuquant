@@ -1,3 +1,8 @@
+/**
+ * @file turbovec_ffi.h
+ * @brief C-ABI Foreign Function Interface for TurboQuant vector index.
+ */
+
 #ifndef AMUQUANT_TURBOVEC_FFI_H
 #define AMUQUANT_TURBOVEC_FFI_H
 
@@ -19,12 +24,18 @@ typedef enum {
 
 typedef struct TurbovecIndexHandle TurbovecIndexHandle;
 
+/**
+ * @brief Allocates and initializes an in-process TurboQuant vector index.
+ */
 TurbovecStatus turbovec_init(
     uint32_t dimension,
     uint8_t bit_width,
     TurbovecIndexHandle** out_handle
 );
 
+/**
+ * @brief Inserts a contiguous raw float vector into the quantized index.
+ */
 TurbovecStatus turbovec_insert_zero_copy(
     TurbovecIndexHandle* handle,
     uint64_t chunk_id,
@@ -32,6 +43,9 @@ TurbovecStatus turbovec_insert_zero_copy(
     size_t len
 );
 
+/**
+ * @brief Queries Top-K cosine similarity matches via SIMD dot-product acceleration.
+ */
 TurbovecStatus turbovec_search_simd(
     const TurbovecIndexHandle* handle,
     const float* query_vector,
@@ -41,15 +55,24 @@ TurbovecStatus turbovec_search_simd(
     uint32_t* out_count
 );
 
+/**
+ * @brief Requantizes indexed vectors from 4-bit to 2-bit representations in-place.
+ */
 TurbovecStatus turbovec_requantize_to_2bit(
     TurbovecIndexHandle* handle
 );
 
+/**
+ * @brief Returns total heap allocation allocated by indexed vectors in bytes.
+ */
 TurbovecStatus turbovec_get_memory_usage(
     const TurbovecIndexHandle* handle,
     size_t* out_bytes
 );
 
+/**
+ * @brief Frees the vector index instance and releases heap allocations.
+ */
 TurbovecStatus turbovec_free(
     TurbovecIndexHandle* handle
 );

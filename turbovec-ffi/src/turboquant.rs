@@ -1,5 +1,5 @@
-//! Implementasi Rust mandiri dari algoritma Google Research TurboQuant (ICLR 2026).
-//! Menggunakan rotasi ortogonal acak deterministik dan kuantisasi skalar Lloyd-Max.
+//! Standalone Rust implementation of the Google Research TurboQuant algorithm (ICLR 2026).
+//! Provides deterministic block-orthogonal rotation and Lloyd-Max scalar vector quantization.
 
 use std::sync::RwLock;
 
@@ -56,7 +56,7 @@ impl TurboIndex {
         let num_blocks = (dimension + block_size - 1) / block_size;
         let mut orthogonal_matrix = vec![0.0f32; num_blocks * block_size * block_size];
 
-        // Matriks ortogonal deterministik per-blok
+        // Deterministic block-diagonal orthogonal projection matrix
         for b in 0..num_blocks {
             let offset = b * block_size * block_size;
             for i in 0..block_size {

@@ -11,7 +11,7 @@ name = "turbovec_ffi"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# Dependensi turbovec core atau implementasi embedded TurboQuant
+# Optional embedded turbovec dependency
 # turbovec = { version = "0.1", optional = true }
 
 [profile.release]

@@ -1,3 +1,8 @@
+/**
+ * @file controller.hpp
+ * @brief Predictive memory pressure controller and co-adaptive finite state machine.
+ */
+
 #ifndef AMUQUANT_CONTROLLER_HPP
 #define AMUQUANT_CONTROLLER_HPP
 
@@ -23,6 +28,9 @@ public:
     );
     ~AMUQuantController() = default;
 
+    /**
+     * @brief Periodic arbitration step evaluating memory pressure, KV eviction, and prefetch depth.
+     */
     StepDecision on_token_step(
         uint32_t token_step,
         uint32_t current_seq_len,
@@ -31,6 +39,9 @@ public:
         const KVSeqAddFunc& seq_add
     );
 
+    /**
+     * @brief Calculates predictive pressure metric Phi_t combining static saturation and differential slope.
+     */
     double compute_phi_score(
         const MemoryStats& current_stats,
         double elapsed_sec,

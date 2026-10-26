@@ -1,3 +1,8 @@
+/**
+ * @file turboquant.hpp
+ * @brief High-performance TurboQuant vector quantization engine.
+ */
+
 #ifndef AMUQUANT_TURBOQUANT_HPP
 #define AMUQUANT_TURBOQUANT_HPP
 
@@ -26,22 +31,22 @@ public:
     ~TurboQuantEngine() = default;
 
     /**
-     * @brief Menyisipkan vektor float tanpa penyalinan perantara (Zero-Copy).
+     * @brief Quantizes and inserts a contiguous float vector.
      */
     void insert(uint64_t chunk_id, const float* data, size_t len);
 
     /**
-     * @brief Menjalankan pencarian Top-K kemiripan kosinus berbasis SIMD.
+     * @brief Computes Top-K cosine similarity candidates using SIMD-accelerated dot products.
      */
     std::vector<SearchResult> search_simd(const float* query_data, size_t len, uint32_t top_k) const;
 
     /**
-     * @brief Mengompresi ulang seluruh vektor yang tersimpan dari 4-bit ke 2-bit in-place.
+     * @brief Requantizes all stored vectors from 4-bit to 2-bit representations in-place.
      */
     void requantize_to_2bit();
 
     /**
-     * @brief Mendapatkan penggunaan memori heap dalam satuan byte.
+     * @brief Computes heap allocation footprint for indexed vectors in bytes.
      */
     size_t get_memory_bytes() const;
 
@@ -51,19 +56,18 @@ public:
 
 private:
     uint32_t dimension_;
-    uint8_t bit_width_; // 4 atau 2
+    uint8_t bit_width_;
     mutable std::mutex mutex_;
 
-    // Matriks rotasi ortogonal acak Q (tersimpan dalam blok teratur untuk efisiensi SIMD cache)
+    // Block-diagonal random orthogonal rotation matrix Q for SIMD cache locality
     std::vector<float> orthogonal_matrix_;
 
-    // Tabel batas (thresholds) dan centroid Lloyd-Max
+    // Lloyd-Max quantization codebooks and thresholds for standard normal N(0, 1)
     std::vector<float> centroids_4bit_;
     std::vector<float> thresholds_4bit_;
     std::vector<float> centroids_2bit_;
     std::vector<float> thresholds_2bit_;
 
-    // Kumpulan vektor terkompresi
     std::vector<QuantizedVector> vectors_;
 
     void init_codebooks();

@@ -1,3 +1,8 @@
+/**
+ * @file layer_manager.hpp
+ * @brief Layer-wise virtual memory paging and kernel madvise management.
+ */
+
 #ifndef AMUQUANT_LAYER_MANAGER_HPP
 #define AMUQUANT_LAYER_MANAGER_HPP
 
@@ -23,23 +28,22 @@ public:
     ~LayerManager() = default;
 
     /**
-     * @brief Mendaftarkan rentang alamat memori virtual untuk satu layer bobot model.
+     * @brief Registers the virtual address range of a model layer's mmap weights.
      */
     void register_layer(uint32_t layer_idx, void* addr, size_t size_bytes);
 
     /**
-     * @brief Dipanggil sebelum eksekusi komputasi layer dimulai. Melakukan prefetching jika diizinkan rejim.
+     * @brief Issues prefetch advisories (POSIX_MADV_WILLNEED) for upcoming layers.
      */
     void on_layer_forward_begin(uint32_t layer_idx, uint32_t prefetch_depth);
 
     /**
-     * @brief Dipanggil segera setelah komputasi layer selesai.
-     * @param aggressive_evict Jika true (Regime 2/3), segera panggil madvise(POSIX_MADV_DONTNEED).
+     * @brief Post-forward hook to evict cold layer pages via POSIX_MADV_DONTNEED.
      */
     void on_layer_forward_end(uint32_t layer_idx, bool aggressive_evict);
 
     /**
-     * @brief Menghitung total estimasi memori layer yang saat ini berstatus residen di RAM.
+     * @brief Returns the estimated resident weight footprint across all registered layers.
      */
     uint64_t get_resident_weight_bytes() const;
 

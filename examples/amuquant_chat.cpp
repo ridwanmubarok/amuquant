@@ -22,7 +22,7 @@ using namespace amuquant;
 
 namespace {
 
-// ANSI escape sequences untuk antarmuka terminal bersih ala Claude Code
+// ANSI escape sequences for terminal interface styling
 const char* ANSI_RESET   = "\033[0m";
 const char* ANSI_BOLD    = "\033[1m";
 const char* ANSI_CYAN    = "\033[36m";
@@ -46,7 +46,7 @@ int get_optimal_pcore_threads() {
 }
 
 int calculate_optimal_gpu_layers(const std::string& model_path, const GGUFModelInfo& model_info, const MemoryStats& mem_stats) {
-    // 1. Periksa override via environment variable AMUQUANT_GPU_LAYERS
+    // 1. Environment variable override (AMUQUANT_GPU_LAYERS)
     const char* env_val = std::getenv("AMUQUANT_GPU_LAYERS");
     if (env_val != nullptr) {
         try {
@@ -55,7 +55,7 @@ int calculate_optimal_gpu_layers(const std::string& model_path, const GGUFModelI
         } catch (...) {}
     }
 
-    // 2. Periksa ukuran file bobot model pada disk
+    // 2. Check model weight file size on disk
     uint64_t file_bytes = 0;
     try {
         if (std::filesystem::exists(model_path)) {
@@ -63,27 +63,26 @@ int calculate_optimal_gpu_layers(const std::string& model_path, const GGUFModelI
         }
     } catch (...) {}
 
-    // Model dengan bobot <= 3.5 GB (seperti 8B Q2_K 2.96 GB, atau 3B Q4_K_M 2.0 GB):
-    // Dapat di-offload 100% penuh ke Metal GPU tanpa memicu Metal OOM pada host 8 GB RAM
+    // Models <= 3.5 GB (e.g. 8B Q2_K 2.96 GB, 3B Q4_K_M 2.0 GB):
+    // Full GPU offloading (99 layers) without Metal host buffer exhaustion
     if (file_bytes > 0 && file_bytes <= 3500ULL * 1024ULL * 1024ULL) {
         return 99;
     }
 
-    // 3. Model kecil berdasarkan dimensi layer (0.5B, 1.5B, 3B): offload penuh ke Metal GPU
+    // 3. Compact models (<= 28 blocks or small hidden dim): full GPU offloading
     if (model_info.block_count <= 28 || model_info.embedding_length < 3000) {
         return 99;
     }
 
-    // 4. Perangkat dengan RAM 16 GB ke atas: muat penuh di Metal GPU
+    // 4. Systems with >= 16 GB unified RAM: full GPU offloading
     if (mem_stats.total_ram_bytes >= 15ULL * 1024ULL * 1024ULL * 1024ULL) {
         return 99;
     }
 
-    // 5. Model 8B besar (bobot > 3.5 GB, e.g. Q4_K_M 4.9 GB) pada Unified Memory 8 GB:
-    // Alokasi buffer Metal yang stabil tanpa memicu error Metal OOM adalah 14 hingga 16 layer.
+    // 5. Large models (> 3.5 GB) on 8 GB unified host: hybrid CPU/GPU partitioning
     uint64_t avail_mb = mem_stats.available_ram_bytes / (1024 * 1024);
     
-    // Auto-calibration: cadangkan 700 MB headroom sistem di RAM
+    // Reserve ~700 MB headroom for OS host stability
     uint64_t target_vram_mb = (avail_mb > 1400) ? (avail_mb - 700) : 2200;
     if (target_vram_mb > 2500) target_vram_mb = 2500;
     if (target_vram_mb < 2000) target_vram_mb = 2000;
@@ -168,21 +167,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 2. Inisialisasi engine AMU-QUANT
+    // 2. Configure AMU-QUANT engine runtime budget
     AMUQuantConfig cfg;
     cfg.num_layers = model_info.block_count > 0 ? model_info.block_count : 32;
     cfg.embedding_dim = model_info.embedding_length > 0 ? model_info.embedding_length : 4096;
     
     if (model_info.embedding_length >= 4096 || model_info.block_count >= 32) {
-        // Profil Model 8B (Ukuran bobot ~4.9 GB pada host 8 GB Unified Memory)
+        // 8B class model profile (~4.9 GB weights on 8 GB unified host)
         cfg.memory_limit_bytes = 4800ULL * 1024ULL * 1024ULL; // 4.8 GB safe budget
-        cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // 600 MB cadangan OS
+        cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // 600 MB OS headroom
     } else if (model_info.block_count >= 28 || model_info.embedding_length >= 2048) {
-        // Profil Model 3B (Ukuran bobot ~2.0 GB di Unified Memory Metal)
+        // 3B class model profile (~2.0 GB weights on unified host)
         cfg.memory_limit_bytes = 2400ULL * 1024ULL * 1024ULL; // 2.4 GB budget
-        cfg.os_reserved_bytes  = 400ULL * 1024ULL * 1024ULL;  // 400 MB cadangan OS
+        cfg.os_reserved_bytes  = 400ULL * 1024ULL * 1024ULL;  // 400 MB OS headroom
     } else {
-        // Profil Model 0.5B - 1B
+        // Sub-1B class model profile
         cfg.memory_limit_bytes = 800ULL * 1024ULL * 1024ULL;
         cfg.os_reserved_bytes  = 200ULL * 1024ULL * 1024ULL;
     }
@@ -193,11 +192,11 @@ int main(int argc, char** argv) {
 
     AMUQuantEngine engine(cfg);
     if (engine.initialize() != Status::OK) {
-        std::cerr << "Inisialisasi AMUQuantEngine gagal.\n";
+        std::cerr << "Failed to initialize AMUQuantEngine.\n";
         return 1;
     }
 
-    // 3. Inisialisasi Backend libllama dengan Akselerasi Hybrid Auto-Calibrated
+    // 3. Initialize libllama backend with auto-calibrated hybrid acceleration
     llama_log_set([](enum ggml_log_level level, const char* text, void*) {
         if (level == GGML_LOG_LEVEL_ERROR) {
             std::cerr << "[LLAMA ERROR] " << text;
@@ -339,7 +338,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // 5. Format prompt sesuai arsitektur model (Llama-3 atau Qwen ChatML)
+        // 5. Format prompt according to model architecture (Llama-3 or Qwen ChatML)
         std::string user_prompt;
         if (is_llama) {
             user_prompt = "<|start_header_id|>user<|end_header_id|>\n\n" + user_input + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
@@ -368,41 +367,41 @@ int main(int argc, char** argv) {
         }
 
         if (llama_decode(ctx, batch) != 0) {
-            std::cerr << "Gagal men-decode batch prompt.\n";
+            std::cerr << "Failed to decode prompt batch.\n";
             continue;
         }
         n_past += n_tokens;
 
-        // 6. Generasi token autoregresif secara streaming
+        // 6. Autoregressive streaming token generation loop
         std::cout << ANSI_BOLD << ANSI_CYAN << "assistant> " << ANSI_RESET;
 
         auto t_start = std::chrono::steady_clock::now();
         uint32_t generated_tokens = 0;
 
         for (int step = 0; step < 512; ++step) {
-            // Sample token berikutnya dari distribusi logits model
+            // Sample next token from logits distribution
             llama_token new_token_id = llama_sampler_sample(smpl, ctx, -1);
             llama_sampler_accept(smpl, new_token_id);
 
-            // Periksa token henti (End of Generation / <|im_end|>)
+            // Check end-of-generation token
             if (llama_vocab_is_eog(vocab, new_token_id)) {
                 break;
             }
 
-            // Konversi token menjadi teks string dan stream ke layar
+            // Stream token piece to standard output
             char piece_buf[128];
             int piece_len = llama_token_to_piece(vocab, new_token_id, piece_buf, sizeof(piece_buf), 0, true);
             if (piece_len > 0) {
                 std::cout << std::string(piece_buf, piece_len) << std::flush;
             }
 
-            // Trigger hook kontroler AMU-QUANT untuk memonitor memori & KV pruning
+            // Trigger AMU-QUANT controller hook to arbitrate memory pressure and KV eviction
             engine.step_token(n_past, n_past + 1, extractor, seq_rm, seq_add);
 
-            // Ambil posisi sekuens tertinggi yang valid dari memori KV llama
+            // Fetch highest valid sequence position from physical KV memory
             llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
 
-            // Siapkan batch untuk decode token tunggal berikutnya
+            // Prepare batch for next single-token decode step
             batch.n_tokens = 1;
             batch.token[0] = new_token_id;
             batch.pos[0] = next_pos;

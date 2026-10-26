@@ -1,3 +1,8 @@
+/**
+ * @file gguf_parser.hpp
+ * @brief Fast zero-copy metadata and tensor layout parser for GGUF model files.
+ */
+
 #ifndef AMUQUANT_GGUF_PARSER_HPP
 #define AMUQUANT_GGUF_PARSER_HPP
 
@@ -28,17 +33,17 @@ enum class GGUFType : uint32_t {
 struct GGUFTensorInfo {
     std::string name;
     uint32_t n_dims{0};
-    std::vector<uint64_t> ne; // Jumlah elemen tiap dimensi
-    uint32_t type{0};        // Format kuantisasi (Q4_K, Q8_0, F16, dll.)
-    uint64_t offset{0};      // Offset relatif terhadap data buffer
-    size_t size_bytes{0};    // Estimasi ukuran byte
-    int32_t layer_idx{-1};   // Nomor layer hasil parsing nama tensor
+    std::vector<uint64_t> ne; // Elements per dimension
+    uint32_t type{0};        // Quantization format enum (GGML_TYPE)
+    uint64_t offset{0};      // Byte offset relative to tensor data buffer
+    size_t size_bytes{0};    // Estimated tensor payload in bytes
+    int32_t layer_idx{-1};   // Extracted transformer block index (-1 if non-layer)
 };
 
 struct GGUFModelInfo {
     std::string architecture;
-    uint32_t block_count{0};     // Jumlah layer transformator
-    uint32_t embedding_length{0}; // Dimensi tersembunyi
+    uint32_t block_count{0};
+    uint32_t embedding_length{0};
     uint32_t context_length{0};
     uint32_t head_count{0};
     uint32_t head_count_kv{0};
@@ -46,7 +51,7 @@ struct GGUFModelInfo {
     uint64_t metadata_kv_count{0};
     std::vector<GGUFTensorInfo> tensors;
     
-    // Pemetaan layer ke daftar rentang tensor
+    // Mapping from layer index to tensor indices
     std::unordered_map<uint32_t, std::vector<size_t>> layer_tensors;
 };
 
@@ -56,7 +61,7 @@ public:
     ~GGUFParser() = default;
 
     /**
-     * @brief Mem-parsing file model .gguf secara cepat dengan memetakan header ke memori.
+     * @brief Parses GGUF header and metadata key-value pairs without loading tensor payloads.
      */
     bool parse_file(const std::string& filepath, GGUFModelInfo& out_info);
 };

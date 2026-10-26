@@ -1,3 +1,8 @@
+/**
+ * @file types.hpp
+ * @brief Core types, operational regimes, and telemetry structures for AMU-QUANT.
+ */
+
 #ifndef AMUQUANT_TYPES_HPP
 #define AMUQUANT_TYPES_HPP
 
@@ -8,7 +13,7 @@
 namespace amuquant {
 
 /**
- * @brief Tiga rejim operasional kontroler adaptif AMU-QUANT.
+ * @brief Tri-modal operational regimes of the co-adaptive controller.
  */
 enum class Regime : uint8_t {
     REGIME_1_HIGH_THROUGHPUT = 1,
@@ -17,7 +22,7 @@ enum class Regime : uint8_t {
 };
 
 /**
- * @brief Kode status eksekusi operasi AMU-QUANT.
+ * @brief Execution status codes for AMU-QUANT operations.
  */
 enum class Status : int32_t {
     OK = 0,
@@ -28,7 +33,7 @@ enum class Status : int32_t {
 };
 
 /**
- * @brief Struktur statistik telemetri memori sistem dan proses.
+ * @brief Host and process memory telemetry snapshot.
  */
 struct MemoryStats {
     uint64_t total_ram_bytes{0};
@@ -40,38 +45,38 @@ struct MemoryStats {
 };
 
 /**
- * @brief Parameter konfigurasi kontroler adaptif AMU-QUANT.
+ * @brief Configuration parameters for the AMU-QUANT runtime engine.
  */
 struct AMUQuantConfig {
-    uint64_t memory_limit_bytes{14ULL * 1024ULL * 1024ULL * 1024ULL}; // Default 14 GB (untuk RAM 16 GB)
-    uint64_t os_reserved_bytes{2ULL * 1024ULL * 1024ULL * 1024ULL};   // Cadangan kernel 2 GB
+    uint64_t memory_limit_bytes{14ULL * 1024ULL * 1024ULL * 1024ULL}; // Target working budget
+    uint64_t os_reserved_bytes{2ULL * 1024ULL * 1024ULL * 1024ULL};   // Reserved for OS kernel stability
     
-    // Parameter Skor Tekanan Prediktif Φ_t
+    // Predictive pressure score weights: Phi_t = alpha * M_curr + beta * tau * dM/dt
     double alpha{0.65};
     double beta{0.35};
     double tau_horizon_sec{2.0};
     
-    // Ambang Batas Transisi Rejim
+    // Regime transition thresholds with hysteresis band
     double theta_low{0.65};
     double theta_high{0.85};
     double delta_hyst{0.05};
     
-    // Interval evaluasi telemetri
+    // Telemetry sampling interval
     uint32_t eval_interval_tokens{8};
     
-    // Parameter Jendela Konteks KV-Cache
+    // Attention sink and recent context window geometry
     uint32_t attention_sink_tokens{4};
     uint32_t recent_window_tokens{256};
-    uint32_t min_recent_window_tokens{64}; // Batas darurat Regime 3
+    uint32_t min_recent_window_tokens{64}; // Emergency clamp for Regime 3
     
-    // Parameter Model & Representasi Vektor
-    uint32_t num_layers{64};          // Default layer
-    uint32_t embedding_dim{4096};     // Dimensi vektor tersembunyi
-    uint8_t initial_bit_width{4};     // Kuantisasi awal 4-bit
+    // Model architecture parameters
+    uint32_t num_layers{64};
+    uint32_t embedding_dim{4096};
+    uint8_t initial_bit_width{4};
 };
 
 /**
- * @brief Hasil keputusan kontroler pada setiap langkah inferensi token.
+ * @brief Controller arbitration decision emitted per token step.
  */
 struct StepDecision {
     Regime regime{Regime::REGIME_1_HIGH_THROUGHPUT};

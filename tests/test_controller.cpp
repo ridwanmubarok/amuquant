@@ -21,7 +21,7 @@ int main() {
     cfg.theta_low = 0.65;
     cfg.theta_high = 0.85;
     cfg.delta_hyst = 0.05;
-    cfg.eval_interval_tokens = 1; // Evaluasi setiap langkah untuk pengujian
+    cfg.eval_interval_tokens = 1; // Evaluate every step for test precision
 
     TurbovecIndexHandle* handle = nullptr;
     turbovec_init(cfg.embedding_dim, cfg.initial_bit_width, &handle);
@@ -34,13 +34,13 @@ int main() {
 
     AMUQuantController controller(cfg, telemetry, layer_mgr, kv_surgeon, handle);
 
-    // Dummy callback lambdas
+    // Mock callback lambdas
     std::vector<float> dummy_vec(cfg.embedding_dim, 0.5f);
     auto extractor = [&](int32_t) -> const float* { return dummy_vec.data(); };
     auto seq_rm = [](int32_t, int32_t) {};
     auto seq_add = [](int32_t, int32_t, int32_t) {};
 
-    // 1. Kondisi Normal (RSS = 4 GB / 14 GB ~ 28% utilitas) -> Harusnya REGIME_1
+    // 1. Baseline state (RSS = 4 GB / 14 GB ~ 28% load) -> Expect REGIME_1
     MemoryStats s1{};
     s1.timestamp_sec = 10.0;
     s1.process_rss_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -52,7 +52,7 @@ int main() {
     assert(!d1.aggressive_evict);
     std::cout << "  - Low Load (RSS 4GB) -> Regime 1 (High-Throughput): OK" << std::endl;
 
-    // 2. Kenaikan Memori Moderat (RSS = 10 GB / 14 GB ~ 71.4% utilitas, bertahap selama 30 detik) -> Masuk REGIME_2
+    // 2. Moderate pressure increase (RSS = 10 GB / 14 GB ~ 71.4% load) -> Transitions to REGIME_2
     MemoryStats s2{};
     s2.timestamp_sec = 40.0;
     s2.process_rss_bytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -64,7 +64,7 @@ int main() {
     assert(d2.aggressive_evict);
     std::cout << "  - Moderate Load (RSS 10GB) -> Regime 2 (Balanced Offload): OK" << std::endl;
 
-    // 3. Kenaikan Memori Ekstrem (RSS = 13 GB / 14 GB ~ 92.8% utilitas) -> Masuk REGIME_3
+    // 3. Critical memory pressure (RSS = 13 GB / 14 GB ~ 92.8% load) -> Transitions to REGIME_3
     MemoryStats s3{};
     s3.timestamp_sec = 50.0;
     s3.process_rss_bytes = 13ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -74,11 +74,11 @@ int main() {
     assert(d3.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL);
     assert(d3.prefetch_depth == 0);
     assert(d3.aggressive_evict);
-    assert(d3.requantized_to_2bit); // Memastikan pemicu kuantisasi 2-bit
+    assert(d3.requantized_to_2bit);
     std::cout << "  - Critical Load (RSS 13GB) -> Regime 3 (Survival Mode 2-bit): OK" << std::endl;
 
-    // 4. Uji Histeresis: Memori sedikit turun ke 82% (di bawah theta_high 85%, tapi belum < 80%)
-    // Sistem harus tetap bertahan di REGIME_3 untuk mencegah thrashing
+    // 4. Hysteresis stabilization: memory drops to 82% (below theta_high 85%, but above reset floor 80%)
+    // State machine must remain in REGIME_3 to prevent thrashing
     MemoryStats s4{};
     s4.timestamp_sec = 60.0;
     s4.process_rss_bytes = static_cast<uint64_t>(14ULL * 1024ULL * 1024ULL * 1024ULL * 0.82);
@@ -88,7 +88,7 @@ int main() {
     assert(d4.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL);
     std::cout << "  - Hysteresis Prevention (82% usage in survival) -> Retained Regime 3: OK" << std::endl;
 
-    // 5. Memori turun drastis di bawah (theta_high - delta_hyst) -> Kembali ke REGIME_2
+    // 5. Memory relieved below (theta_high - delta_hyst) -> Demotes back to REGIME_2
     MemoryStats s5{};
     s5.timestamp_sec = 70.0;
     s5.process_rss_bytes = static_cast<uint64_t>(14ULL * 1024ULL * 1024ULL * 1024ULL * 0.72);

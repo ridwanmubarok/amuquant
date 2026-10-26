@@ -42,25 +42,25 @@ MemoryStats SystemTelemetry::sample() {
     MemoryStats stats{};
     stats.timestamp_sec = get_time_seconds();
 
-    // 1. Ambil data Major Page Faults via getrusage
+    // Process page fault metrics via getrusage
     struct rusage usage{};
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
         stats.major_page_faults = static_cast<uint64_t>(usage.ru_majflt);
     }
 
 #if defined(__APPLE__)
-    // 2. Ambil RSS proses pada macOS via task_info (phys_footprint)
+    // Query physical footprint on Darwin via task_info (TASK_VM_INFO)
     task_vm_info_data_t vm_info{};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm_info), &count);
     if (kr == KERN_SUCCESS) {
         stats.process_rss_bytes = static_cast<uint64_t>(vm_info.phys_footprint);
     } else {
-        // Fallback ke ru_maxrss
+        // Fallback to high-water mark ru_maxrss
         stats.process_rss_bytes = static_cast<uint64_t>(usage.ru_maxrss);
     }
 
-    // 3. Ambil total RAM fisik sistem
+    // Host physical RAM size
     int mib[2] = {CTL_HW, HW_MEMSIZE};
     uint64_t total_ram = 0;
     size_t length = sizeof(total_ram);
@@ -68,7 +68,7 @@ MemoryStats SystemTelemetry::sample() {
         stats.total_ram_bytes = total_ram;
     }
 
-    // 4. Ambil RAM yang tersedia (Free + Inactive + Speculative)
+    // Available physical RAM (free + inactive + speculative pages)
     mach_port_t host_port = mach_host_self();
     vm_size_t page_size = 0;
     host_page_size(host_port, &page_size);
@@ -82,7 +82,7 @@ MemoryStats SystemTelemetry::sample() {
         stats.available_ram_bytes = free_bytes + inactive_bytes + speculative_bytes;
     }
 
-    // 5. Ambil swap usage
+    // Host swap utilization
     struct xsw_usage swap_usage{};
     size_t swap_len = sizeof(swap_usage);
     if (sysctlbyname("vm.swapusage", &swap_usage, &swap_len, nullptr, 0) == 0) {
@@ -90,7 +90,7 @@ MemoryStats SystemTelemetry::sample() {
     }
 
 #elif defined(__linux__)
-    // Implementasi Linux via /proc/meminfo dan /proc/self/statm
+    // Linux implementation via /proc/meminfo and /proc/self/statm
     long page_size = sysconf(_SC_PAGESIZE);
 
     std::ifstream statm("/proc/self/statm");
