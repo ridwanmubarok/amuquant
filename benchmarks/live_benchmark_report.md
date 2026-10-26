@@ -10,14 +10,14 @@
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
 | **Tokens Generated** | 64/64 | 64/64 | 64/64 |
-| **Peak Physical RSS** | 171 MB | 209 MB | 203 MB |
-| **Empirical Process RSS Delta** | 5 MB | 34 MB | 39 MB |
-| **Inference Throughput** | 22.38 tok/s | 23.08 tok/s | 23.64 tok/s |
+| **Peak Physical RSS** | 166 MB | 195 MB | 197 MB |
+| **Empirical Process RSS Delta** | -9 MB | 40 MB | 39 MB |
+| **Inference Throughput** | 22.78 tok/s | 25.61 tok/s | 25.22 tok/s |
 | **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **2448 KB** |
 | **Context Tokens Safely Archived** | 0 | 0 | **68** |
 | **Tier 1: Index Sanity Match** | N/A | N/A | **0.8605** |
 | **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **0.349 ms** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.397 ms** |
 
 > [!NOTE]
 > **Accounting Notice on Physical vs Logical Memory**:
@@ -34,7 +34,7 @@
 | **Logical KV Capacity Reclaimed** | 0 KB | **11088 KB** |
 | **Context Tokens Archived to turbovec** | 0 | **308 tokens** |
 | **Turn 1 Master Key Recall** | In Attention Buffer | **100% Match (Recall@3)** |
-| **Episodic SIMD Retrieval Latency** | N/A | **2.196 ms** |
+| **Episodic SIMD Retrieval Latency** | N/A | **1.234 ms** |
 
 ## 3. Scenario 3A: Deterministic FSM State Transition Test (Mock Telemetry)
 
@@ -45,8 +45,8 @@
 | **FSM Operational Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
 | **Logical KV Capacity Reclaimed** | **2736 KB** |
-| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.2279 ms)** |
-| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.4409 ms)** |
+| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.1567 ms)** |
+| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.5242 ms)** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
 | **Episodic Vector Memory Footprint** | **553 KB (50% In-Place Compaction)** |
 
@@ -61,15 +61,15 @@
 | **Dynamic Requantization** | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
 | **Logical KV Capacity Reclaimed** | **2592 KB** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
-| **Process RSS Before / After** | 165 MB / 2253 MB (Delta: 2088 MB) |
+| **Process RSS Before / After** | 177 MB / 2246 MB (Delta: 2069 MB) |
 
 ## 5. Scenario 4: Runtime Arbitration Policy Ablation Matrix
 
 | Policy Configuration | Target Throughput | Peak Physical RSS | KV Reclaimed | Final Regime |
 | :--- | :--- | :--- | :--- | :--- |
-| **Predictive Cost-Benefit (PCBM)** | 24.37 tok/s | 1735 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
-| **Static Threshold Hysteresis** | 24.80 tok/s | 197 MB | **2016 KB** | REGIME_3_ULTRA_LOW_SURVIVAL |
-| **Static KV Eviction Only** | 25.28 tok/s | 199 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
+| **Predictive Cost-Benefit (PCBM)** | 23.30 tok/s | 1669 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
+| **Static Threshold Hysteresis** | 24.00 tok/s | 1285 MB | **2016 KB** | REGIME_3_ULTRA_LOW_SURVIVAL |
+| **Static KV Eviction Only** | 24.55 tok/s | 1285 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
 
 ## 6. Scenario 5: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 
