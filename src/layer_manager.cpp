@@ -1,6 +1,8 @@
 #include "amuquant/layer_manager.hpp"
 
+#include <sys/types.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <algorithm>
 
 namespace amuquant {
@@ -74,6 +76,68 @@ uint64_t LayerManager::get_resident_weight_bytes() const {
         if (idx < layers_.size()) {
             total += layers_[idx].byte_len;
         }
+    }
+    return total;
+}
+
+uint64_t LayerManager::query_actual_resident_bytes_locked(const LayerDescriptor& layer) const {
+    if (layer.addr_start == nullptr || layer.byte_len == 0) {
+        return 0;
+    }
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        return 0;
+    }
+
+    const uintptr_t start = reinterpret_cast<uintptr_t>(layer.addr_start);
+    const uintptr_t page_mask = static_cast<uintptr_t>(page_size - 1);
+    const uintptr_t aligned_start = start & ~page_mask;
+    const size_t offset = static_cast<size_t>(start - aligned_start);
+    const size_t aligned_len = ((layer.byte_len + offset + page_mask) / page_size) * page_size;
+    const size_t num_pages = aligned_len / page_size;
+
+    if (num_pages == 0) {
+        return 0;
+    }
+
+    std::vector<unsigned char> vec(num_pages, 0);
+
+#if defined(__APPLE__) || defined(__MACH__)
+    int res = mincore(reinterpret_cast<caddr_t>(aligned_start), aligned_len, reinterpret_cast<char*>(vec.data()));
+#elif defined(_WIN32)
+    int res = -1;
+#else
+    int res = mincore(reinterpret_cast<void*>(aligned_start), aligned_len, vec.data());
+#endif
+
+    if (res != 0) {
+        return 0;
+    }
+
+    uint64_t resident_pages = 0;
+    for (size_t i = 0; i < num_pages; ++i) {
+        if (vec[i] & 1) {
+            resident_pages++;
+        }
+    }
+
+    return resident_pages * static_cast<uint64_t>(page_size);
+}
+
+uint64_t LayerManager::get_actual_resident_bytes(uint32_t layer_idx) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (layer_idx >= layers_.size()) {
+        return 0;
+    }
+    return query_actual_resident_bytes_locked(layers_[layer_idx]);
+}
+
+uint64_t LayerManager::get_total_actual_resident_bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t total = 0;
+    for (const auto& layer : layers_) {
+        total += query_actual_resident_bytes_locked(layer);
     }
     return total;
 }

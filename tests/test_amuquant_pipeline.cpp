@@ -189,6 +189,14 @@ int main() {
     }
     std::cout << "  - Registered 16 physical mmap transformer layers (16 MB real resident RAM): OK" << std::endl;
 
+    // Verify mincore(2) kernel page table telemetry
+    uint64_t actual_layer_0 = engine.get_layer_manager()->get_actual_resident_bytes(0);
+    uint64_t total_actual = engine.get_layer_manager()->get_total_actual_resident_bytes();
+    assert(actual_layer_0 > 0);
+    assert(total_actual >= actual_layer_0);
+    std::cout << "  - mincore(2) Kernel Page Table Verification: Layer 0 resident = " 
+              << actual_layer_0 << " bytes, Total = " << total_actual << " bytes: OK" << std::endl;
+
     // 2. Prepare Realistic KV-Cache and Context Embedding Store
     constexpr uint32_t TOTAL_STEPS = 90;
     RealisticKVCache kv_cache;

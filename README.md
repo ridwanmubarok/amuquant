@@ -33,7 +33,7 @@ Prior systems exhibit four critical systemic limitations:
 * **Integrated Systems Modules**:
   1. **Transactional KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment and persistent translation mapping (`TokenIndexMap`), backed by a synchronous commit barrier ensuring zero unarchived context loss.
   2. **Episodic Vector Memory**: Non-uniform Lloyd-Max scalar quantization (4-bit/2-bit) providing sub-millisecond semantic retrieval without unbounded memory growth.
-  3. **Advisory Virtual Memory Paging**: Evaluates OS kernel paging hints via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model file segments. Fine-grained intra-forward tensor computation hook streaming is an exploratory optimization under active investigation.
+  3. **Advisory Virtual Memory Paging**: Evaluates OS kernel paging hints via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model file segments, with true physical residency verified via `mincore(2)` kernel page tables. Fine-grained intra-forward tensor computation hook streaming is an exploratory optimization under active investigation.
 
 > [!IMPORTANT]
 > **Decoupled Architecture: Working Attention vs. In-Process Episodic Semantic Memory**:
@@ -257,7 +257,7 @@ flowchart TD
 
 > [!NOTE]
 > **Advisory Paging Scope & Hardware Semantics**:
-> POSIX advisory paging (`posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)`) operates at the Virtual Memory Manager (VMM) level across mapped `.gguf` weight segments. It signals the OS kernel which page frames may be safely dropped from the unified page cache under memory pressure. This represents an OS-runtime memory coordination mechanism and does not alter GGML tensor execution graph ASTs at runtime. Fine-grained intra-forward tensor computation graph rewriting is scoped as orthogonal future work.
+> POSIX advisory paging (`posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)`) operates at the Virtual Memory Manager (VMM) level across mapped `.gguf` weight segments. It signals the OS kernel which page frames may be safely dropped from the unified page cache under memory pressure. `LayerManager::get_actual_resident_bytes()` queries `mincore(2)` to verify whether pages are physical core-resident. This represents an OS-runtime memory coordination mechanism and does not alter GGML tensor execution graph ASTs at runtime. Fine-grained intra-forward tensor computation graph rewriting is scoped as orthogonal future work. Detailed methodology is documented in [Experimental Methodology Part I & II](file:///Users/amubhya/workspace/aegis/docs/04_EXPERIMENTAL_METHODOLOGY.md).
 
 ---
 

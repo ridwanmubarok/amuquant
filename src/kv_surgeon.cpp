@@ -26,6 +26,16 @@ public:
      * @brief Commits an eviction batch to TurboQuant episodic vector memory.
      * Blocks caller until the worker thread verifies that every vector in the batch
      * has been successfully inserted into the index.
+     *
+     * Academic Note on Memory Staging vs Zero-Copy Boundary:
+     * - Vector Pointers (extracted_vecs): Originate from the main inference thread's
+     *   ephemeral activation buffers.
+     * - Staging copy (task.data[i].assign): Creates thread-safe, isolated memory for
+     *   the asynchronous worker queue. This guarantees memory safety and prevents race
+     *   conditions without stalling the forward pass thread.
+     * - Zero-Copy FFI Boundary: turbovec_insert_zero_copy passes task.data[i].data()
+     *   directly across the C/Rust FFI barrier without intermediate allocations in Rust.
+     *
      * @return true if all vectors were safely archived; false if any insertion failed.
      */
     bool commit_batch(const std::vector<uint64_t>& logical_ids, const std::vector<const float*>& extracted_vecs) {
@@ -256,13 +266,16 @@ bool KVSurgeon::execute_eviction(
         seq_rm(range.p_start, range.p_end);
     }
 
-    // 2. Apply RoPE positional shift to close the sequence gap
+    // 2. Apply RoPE positional shift to close the sequence gap:
+    //    When sequence slots [p_start, p_end) are excised, downstream tokens must be
+    //    shifted leftward by shift_delta = -(p_end - p_start). This realigns rotary
+    //    position embeddings (RoPE) so relative attention distances remain coherent.
     int32_t shift_delta = -(range.p_end - range.p_start);
     if (seq_add) {
         seq_add(range.p_end, -1, shift_delta);
     }
 
-    // 3. Update physical-to-logical translation table
+    // 3. Update physical-to-logical translation table (preserves logical ID invariant)
     token_map_.prune_range(range.p_start, range.p_end);
 
     total_archived_tokens_ += static_cast<uint32_t>(count);

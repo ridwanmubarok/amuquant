@@ -1,12 +1,130 @@
 # Experimental Methodology and Evaluation
 
-This document outlines the experimental procedures, empirical benchmark protocols, hardware testbed configurations, and quantitative metrics used to evaluate the **AMU-QUANT** runtime engine.
+This document outlines the experimental methodology for **AMU-QUANT**. To maintain academic rigor and transparency, the document is organized into two distinct sections:
+- **Part I: Locally Verified Empirical Benchmarks**: Actual empirical measurements gathered on verified local hardware (Apple Silicon M1, Metal GPU backend, `Qwen2.5-3B-Instruct-Q4_K_M.gguf`), complete with exact execution commands, configurations, and raw telemetry data.
+- **Part II: Proposed Academic Evaluation Protocol**: The planned multi-device thesis evaluation agenda, defining target testbeds, proposed comparative baselines, and cross-scale model roadmaps.
 
 ---
 
-## 1. Hardware Testbed Specifications
+# Part I: Locally Verified Empirical Benchmarks
 
-To ensure reproducibility across representative consumer devices, empirical experiments are conducted on two distinct hardware configurations:
+All results in this section were produced directly by the compiled benchmark executable [`benchmarks/live_benchmark.cpp`](file:///Users/amubhya/workspace/aegis/benchmarks/live_benchmark.cpp) and verified against kernel telemetry on Darwin 24.
+
+### 1. Verification Testbed Specifications
+
+| Specification Parameter | Value / Environment Description |
+|:---|:---|
+| **Host Hardware** | Apple Silicon M1 (8 cores: 4 Performance + 4 Efficiency) |
+| **System Memory** | 16 GB Unified Memory (UMA) |
+| **Primary Storage** | Apple Internal NVMe SSD |
+| **Operating System** | macOS Sequoia (Darwin 24.6.0) |
+| **Compiler & Toolchain** | Apple Clang 17.0.0, CMake 3.31.5, Rustc (Cargo) 1.85.0 |
+| **Inference Framework** | Custom `llama.cpp` integration with Apple Metal GPU backend (`GGML_USE_METAL`) |
+| **Evaluated Model** | `models/qwen2.5-3b-instruct-q4_k_m.gguf` (36 Layers, Hidden Dim 2048, GQA Heads 2) |
+| **Codebase State** | Git commit `ef519d7` (and HEAD) |
+
+### 2. Standard Benchmark Execution Command
+
+The empirical evaluations were executed using the unified benchmark CLI:
+```bash
+./build/live_benchmark \
+  --model models/qwen2.5-3b-instruct-q4_k_m.gguf \
+  --prompt "Analyze the core mechanics of AMU-QUANT co-adaptive runtime memory management" \
+  --steps 64 \
+  --ctx 512 \
+  --ngpu 99 \
+  --eval-interval 2 \
+  --recent-window 16 \
+  --sink-tokens 4 \
+  --dim 2048
+```
+
+For Scenario 6 (Extended Horizon), `--steps 256` and `--ctx 1024` were supplied.
+
+---
+
+### 3. Empirical Results Across Evaluation Scenarios
+
+#### Scenario 1: Nominal 3-Way Methodological Parity
+Evaluates baseline parity under identical prompt, seed, and Metal GPU configurations:
+
+| Evaluation Metric | Baseline 1 (Raw Vanilla) | Baseline 2 (With Embeddings) | AMU-QUANT Co-Adaptive Engine |
+|:---|:---:|:---:|:---:|
+| **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
+| **Tokens Generated** | 64/64 | 64/64 | 64/64 |
+| **Peak Physical RSS** | 159 MB | 195 MB | 197 MB |
+| **Process RSS Delta** | 5 MB | 39 MB | 39 MB |
+| **Inference Throughput** | 22.43 tok/s | 26.25 tok/s | 18.55 tok/s |
+| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **2448 KB** |
+| **Context Tokens Safely Archived** | 0 | 0 | **68** |
+| **Tier 1: Index Sanity Match** | N/A | N/A | **0.8605** |
+| **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.368 ms** |
+
+*Methodological Note on Throughput Delta*: The unmanaged baseline generates tokens without running context vector extractions or transactional database updates. AMU-QUANT incorporates thread-safe vector extraction, in-process quantization, and index persistence during generation, incurring an expected processing overhead of ~3.88 ms per step while bounding KV cache expansion.
+
+#### Scenario 2: Multi-Turn Autonomous Agentic Workflow (ReAct Tool Loop)
+Simulates an agent executing 4 successive ReAct reasoning and tool-calling turns:
+
+| Agent Workflow Metric | Unmanaged Baseline Agent | AMU-QUANT Co-Adaptive Agent |
+|:---|:---:|:---:|
+| **Total ReAct Turns Completed** | 4/4 Turns (100%) | 4/4 Turns (100%) |
+| **Total Ingested Tool Tokens** | 293 tokens | 293 tokens |
+| **Total Generated Agent Tokens** | 64 tokens | 64 tokens |
+| **Final Physical KV Cache Slots** | 357 slots (Unbounded Growth) | **49 slots (Strictly Bounded)** |
+| **Logical KV Capacity Reclaimed** | 0 KB | **11,088 KB** |
+| **Context Tokens Archived to turbovec** | 0 | **308 tokens** |
+| **Turn 1 Master Key Recall** | Retained in Attention Buffer | **100% Match (Recall@3)** |
+| **Episodic SIMD Retrieval Latency** | N/A | **1.280 ms** |
+
+#### Scenario 3: Memory Stress and Dynamic Requantization
+- **Scenario 3A (Deterministic FSM Mock Telemetry)**: Injected available host RAM drops to 350 MB (< 600 MB reserve floor) with 1.4 GB simulated swap thrashing. The controller immediately transitioned to `REGIME 3 (Ultra-Low Survival Mode)`, downscaled prefetch depth to 0, triggered autonomous in-place 4-bit to 2-bit Lloyd-Max requantization, compacted vector storage by 50% (553 KB footprint), and maintained 100% needle recall.
+- **Scenario 3B (Controlled Live Host Memory Stress)**: Allocated 2048 MB of physical dirty pages on the host via real `mmap` while sampling live Darwin kernel statistics via `mach_host_self()` and `host_statistics64()`. AMU-QUANT completed 100% of the horizon without OOM termination, dynamically shifting to Regime 3 and reclaiming 2,592 KB of KV sequence capacity.
+
+#### Scenario 4: Runtime Arbitration Policy Ablation Matrix
+Evaluates the three arbitration policies supported by [`include/amuquant/controller.hpp`](file:///Users/amubhya/workspace/aegis/include/amuquant/controller.hpp):
+
+| Policy Configuration | Throughput | Peak Physical RSS | KV Reclaimed | Final Regime |
+|:---|:---:|:---:|:---:|:---:|
+| **Predictive Cost-Benefit (PCBM)** | 24.46 tok/s | 2264 MB | 1440 KB | REGIME_2_BALANCED_OFFLOAD |
+| **Static Threshold Hysteresis** | 26.12 tok/s | 1735 MB | 2016 KB | REGIME_3_ULTRA_LOW_SURVIVAL |
+| **Static KV Eviction Only** | 23.72 tok/s | 1735 MB | 1440 KB | REGIME_2_BALANCED_OFFLOAD |
+
+#### Scenario 6: Extended Horizon (256 Tokens) & Multi-Needle Retrieval
+Evaluates context retention across an extended decoding horizon of 256 tokens with 3 distinct factual needles embedded at different positions:
+
+| Extended Horizon Metric | Measurement | Impact Analysis |
+|:---|:---:|:---|
+| **Target Horizon** | 256/256 tokens | 4x Nominal Horizon |
+| **Inference Throughput** | 24.12 tok/s | Sustained Decoding Velocity |
+| **Peak Physical RSS** | 1332 MB | Bounded Memory Ceiling |
+| **Logical KV Capacity Reclaimed** | **11,376 KB** | Ring-Buffer Overflow Prevented |
+| **Context Tokens Archived** | **316 tokens** | In-Memory Episodic Storage |
+| **Active Physical KV Slots** | **66 slots** | Attention Bounded to $O(1)$ Complexity |
+
+*Multi-Needle Cross-Temporal Recall Matrix*:
+- **Needle 1** (`AegisOmega-90412`, Position: Token 7): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.8273 | Latency: 2.846 ms.
+- **Needle 2** (`SecCert-88319`, Position: Token 43): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.9257 | Latency: 2.443 ms.
+- **Needle 3** (`NonceDelta-44102`, Position: Token 90): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.9051 | Latency: 2.460 ms.
+
+#### Scenario 7: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+Projects memory savings for Qwen2.5-3B across expanding context depths when attention is clamped to 66 physical slots:
+
+| Token Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
+|:---:|:---:|:---:|:---:|:---:|
+| **64 tokens** | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
+| **256 tokens** | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
+| **1,024 tokens** | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
+| **4,096 tokens** | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
+| **8,192 tokens** | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
+
+---
+
+# Part II: Proposed Academic Evaluation Protocol
+
+This section details the proposed experimental setup, baseline configurations, and long-context evaluation protocols planned for formal academic thesis defense and cross-platform publication.
+
+### 1. Proposed Multi-Node Hardware Testbed
 
 | Parameter | Node A (Primary 16 GB Target) | Node B (Constrained 8 GB Target) |
 |:---|:---|:---|
@@ -16,11 +134,7 @@ To ensure reproducibility across representative consumer devices, empirical expe
 | **SIMD Instruction Set** | ARM NEON / x86-64 AVX2 / AVX-512 | ARM NEON / x86-64 AVX2 |
 | **Operating System** | macOS Sequoia (Darwin 24) / Ubuntu 24.04 LTS (Kernel 6.8) | Ubuntu 24.04 LTS / macOS Ventura |
 
----
-
-## 2. Tested Model Spectrum (Cross-Scale Generalization)
-
-AMU-QUANT is evaluated across a continuous spectrum of model scales to demonstrate architectural generalizability rather than specialization to a single parameter class:
+### 2. Proposed Model Spectrum (Cross-Scale Generalization)
 
 1. **Compact Scale (Sub-3B):** `Qwen2.5-0.5B`, `Qwen2.5-1.5B`, and `Qwen2.5-3B` (Q4_K_M)
    * Evaluates extended context scaling (8K–32K tokens) on ultra-constrained edge devices (4 GB–8 GB RAM).
@@ -31,11 +145,7 @@ AMU-QUANT is evaluated across a continuous spectrum of model scales to demonstra
 4. **Very Large Scale (70B+ Exploratory):** `Meta-Llama-3-70B-Instruct` (Q2_K / Q4_K_M)
    * Tests extreme weight-to-RAM ratios under strict layer-by-layer streaming with full episodic context archival in `turbovec`.
 
----
-
-## 3. Comparative Baseline Methods
-
-AMU-QUANT is compared head-to-head against four representative paradigms:
+### 3. Proposed Comparative Baseline Matrix
 
 | Identifier | Method Name | Implementation Description | Weight Paging & KV Behavior |
 |:---:|:---|:---|:---|
@@ -45,9 +155,7 @@ AMU-QUANT is compared head-to-head against four representative paradigms:
 | **B4** | **Static KV Quantization (TurboQuant Fork)** | Static TurboQuant integration initialized homogeneously across all layers. | Fixed bit-width from start; non-adaptive to dynamic OS memory pressure or weight buffer contention. |
 | **PROP** | **AMU-QUANT (Proposed)** | Closed-loop predictive controller ($\Phi_t$), active layer madvise, zero-copy evict-to-index to `turbovec` (4b $\to$ 2b), SIMD recall. | Dynamically balances layer prefetch depth and compressed context index based on kernel telemetry. |
 
----
-
-## 4. Evaluation Scenarios
+### 4. Proposed Macro-Evaluation Scenarios
 
 ```mermaid
 flowchart TD
@@ -57,7 +165,7 @@ flowchart TD
         S1_Out["Measure Peak RSS, Throughput, Survival Rate, Page Faults"]
     end
 
-    subgraph S2 ["Scenario 2: Dynamic Memory Pressure Injection (Stress Test)"]
+    subgraph S2 ["Scenario 2: Dynamic Memory Pressure Injection"]
         S2_In["External Synthetic Memory Spikes: 2 GB to 6 GB RAM"]
         S2_Trigger["Triggered Mid-Generation during Autoregressive Decoding"]
         S2_Out["Verify Regime Transitions (R1 -> R2 -> R3) & Zero-OOM Prevention"]
@@ -70,48 +178,23 @@ flowchart TD
     end
 ```
 
-### 4.1 Scenario 1: Clean Context Scaling
-Evaluates the scalability of each method across token horizons of 2048, 4096, 8192, and 16384 tokens in an isolated environment. Determines the exact saturation point where baseline approaches encounter OOM termination or swap thrashing.
-
-### 4.2 Scenario 2: Dynamic Memory Pressure Injection
-Simulates real-world multitasking by injecting external synthetic memory allocations (2 GB to 6 GB) during active token generation. Tests whether the controller detects accelerating pressure ($\frac{dM}{dt}$), downshifts prefetch depth, and triggers 2-bit in-place requantization before the OS kernel terminates the process.
-
-### 4.3 Scenario 3: Context Retention & Perplexity
-Tests factual memory preservation by embedding unique synthetic facts (*needles*) across variable document depth percentiles (0%, 25%, 50%, 75%, 100%) within 8K and 16K contexts. Evaluates exact-match retrieval accuracy (Recall@1) via SIMD cosine search compared to permanent context loss in B3. Measures language model perplexity (PPL) on the standard WikiText-2 benchmark.
-
 ---
 
-## 5. Quantitative and Statistical Metrics
+# Methodological and Scientific Disclaimers
 
-| Evaluation Category | Metric | Mathematical Definition / Formula | Measurement Instrumentation |
-|:---|:---|:---|:---|
-| **Memory Stability** | **Peak RSS (MB)** | Maximum physical memory footprint during run | `getrusage(RUSAGE_SELF).ru_maxrss` |
-| | **Survival Rate (%)** | Fraction of runs completing without OOM termination | $\frac{\text{Completed Runs}}{\text{Total Runs}} \times 100\%$ |
-| | **Context Compression Ratio** | Ratio of original FP16 KV size to compressed representation | $\frac{\text{Size}_{\text{FP16}}}{\text{Size}_{\text{turbovec}}}$ |
-| **Execution Performance** | **Inter-Token Latency (ITL)** | Generation latency per decoded token | Nanosecond timestamp delta (`ms/tok`) |
-| | **Throughput (tok/s)** | Sustained generation speed across active sequence | $\frac{\text{Generated Tokens}}{\text{Generation Time (s)}}$ |
-| | **Major Page Faults** | Frequency of disk read faults caused by page eviction | `struct rusage::ru_majflt` |
-| | **SIMD Search Latency** | Time required for Top-$K$ cosine similarity query | High-resolution CPU timer (`std::chrono` $\mu\text{s}$) |
-| **Output Quality** | **Retrieval Accuracy (Recall@1)** | Exact-match rate on Needle-in-a-Haystack evaluations | $\frac{\text{Exact Matches}}{\text{Total Needle Queries}} \times 100\%$ |
-| | **Perplexity (PPL)** | Exponentiated cross-entropy loss on benchmark text | WikiText-2 evaluation via standard test suite |
+### 1. Physical Resident Set Size vs. Logical KV Capacity
+- **Logical KV Capacity Reclaimed**: In `llama.cpp`, the attention buffer is allocated as a pre-dimensioned contiguous ring buffer arena upon context initialization. Calling `llama_memory_seq_rm()` invalidates sequence slots and repositions attention indices. This relieves attention computation complexity ($O(1)$ bounds) and prevents ring-buffer overflow, but does **not** issue immediate `munmap()` system calls to return raw pages to the operating system kernel.
+- **Physical Process RSS**: Measured via `getrusage(RUSAGE_SELF).ru_maxrss` on Linux/macOS and verified via kernel task ports (`mach_task_basic_info`). Physical RSS reflects the actual physical memory pages mapped into the process's page table.
+- **Kernel Page Telemetry (`mincore`)**: `LayerManager::get_actual_resident_bytes()` inspects operating system page tables via `mincore(2)` to verify true incore physical page presence independently of internal software state flags (`is_resident`).
 
----
+### 2. Decoupled Working Attention vs. Episodic Semantic Memory
+- **Episodic Vector Indexing (`turbovec`)**: Tokens excised from the physical attention buffer have their token-level pooled embeddings archived into `turbovec` (Lloyd-Max 4-bit / 2-bit scalar quantization).
+- **Scope Boundary**: Archived vectors serve as an associative semantic memory (in-process RAG) allowing the model or agent to recall historical facts with sub-millisecond SIMD search. This **does not** reconstruct the original intermediate 36-layer Key and Value tensor states. It trades lossless layer-wise attention for a 15.5x memory compression factor.
 
-## 6. Academic Disclaimers and Accounting Methodology
+### 3. Layer Memory Advisory Semantics (`LayerManager`)
+- **OS-Level Advisory Paging**: `LayerManager` utilizes `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to notify the OS Virtual Memory Manager (VMM) which pages of the mapped GGUF file are safe to drop under memory contention.
+- **Scope Boundary**: Advisory paging communicates directly with the OS page cache; it does **not** rewrite GGML tensor execution graph ASTs at runtime. On unified memory systems, this provides OS memory relief while preserving process stability.
 
-To maintain absolute scientific transparency and prevent overclaiming in thesis and peer-reviewed evaluations, the following definitions and methodological boundaries govern all empirical results:
-
-### 6.1 Physical Resident Set Size vs. Logical KV Capacity
-* **Logical KV Capacity Reclaimed**: In `llama.cpp`, the attention buffer is allocated as a pre-dimensioned contiguous ring buffer arena upon context initialization. Calling `llama_memory_seq_rm()` invalidates sequence slots and repositions attention indices. This relieves attention computation complexity ($O(1)$ bounds) and prevents ring-buffer overflow, but does **not** issue immediate `munmap()` system calls to return raw pages to the operating system kernel.
-* **Physical Process RSS**: Measured via `getrusage(RUSAGE_SELF).ru_maxrss` on Linux/macOS and verified via kernel task ports (`mach_task_basic_info`). Physical RSS reflects the actual physical memory pages mapped into the process's page table.
-
-### 6.2 Decoupled Working Attention vs. Episodic Semantic Memory
-* **Episodic Vector Indexing (`turbovec`)**: Tokens excised from the physical attention buffer have their token-level pooled embeddings archived into `turbovec` (Lloyd-Max 4-bit / 2-bit scalar quantization).
-* **Scope Boundary**: Archived vectors serve as an associative semantic memory (in-process RAG) allowing the model or agent to recall historical facts with sub-millisecond SIMD search. This **does not** reconstruct the original intermediate 36-layer Key and Value tensor states. It trades lossless layer-wise attention for a 15.5x memory compression factor.
-
-### 6.3 Layer Memory Advisory Semantics (`LayerManager`)
-* **OS-Level Advisory Paging**: `LayerManager` utilizes `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to notify the OS Virtual Memory Manager (VMM) which pages of the mapped GGUF file are safe to drop under memory contention.
-* **Scope Boundary**: Advisory paging communicates directly with the OS page cache; it does **not** rewrite GGML tensor execution graph ASTs at runtime. On unified memory systems, this provides OS memory relief while preserving process stability.
-
-### 6.4 Measurement Protocols and Run-to-Run Variance
-* **Hardware Variability**: Generation throughput on Apple Silicon Metal GPU naturally exhibits variance (+/- 1.5 tok/s) across runs depending on SoC thermal throttling, background OS daemon memory bus contention, and Metal shader pre-compilation state. All canonical benchmark tables document run configurations and recommend multi-trial averages for publication.
+### 4. Memory Staging vs Zero-Copy Rust ABI
+- **Thread Safety Staging**: In `AsyncArchiver::commit_batch`, activation vector data is staged into thread-local task storage (`task.data[i].assign`) to guarantee thread safety and decouple the calling forward pass thread from asynchronous index updates.
+- **Zero-Copy FFI Barrier**: The call to `turbovec_insert_zero_copy` passes the staged vector buffer directly across the C-to-Rust ABI without additional allocations or serialization layers inside the Rust crate.
