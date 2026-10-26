@@ -1,7 +1,7 @@
 # AMU-QUANT Live Empirical Benchmark Report: Multi-Scenario Evaluation
 
-- **Model Target**: `models/Meta-Llama-3-8B-Instruct-Q2_K.gguf`
-- **Architecture**: 32 Layers, Dim 4096
+- **Model Target**: `models/qwen2.5-3b-instruct-q4_k_m.gguf`
+- **Architecture**: 36 Layers, Dim 2048
 - **Target Generation Horizon**: 64 tokens
 
 ## 1. Scenario 1: Nominal 3-Way Methodological Parity
@@ -10,14 +10,14 @@
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
 | **Tokens Generated** | 64/64 | 64/64 | 64/64 |
-| **Peak Physical RSS** | 354 MB | 386 MB | 389 MB |
-| **Empirical Process RSS Delta** | 7 MB | 35 MB | 36 MB |
-| **Inference Throughput** | 13.47 tok/s | 15.73 tok/s | 14.47 tok/s |
-| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **8704 KB** |
+| **Peak Physical RSS** | 175 MB | 204 MB | 206 MB |
+| **Empirical Process RSS Delta** | -3 MB | 39 MB | 40 MB |
+| **Inference Throughput** | 21.35 tok/s | 22.98 tok/s | 23.53 tok/s |
+| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **2448 KB** |
 | **Context Tokens Safely Archived** | 0 | 0 | **68** |
-| **Tier 1: Index Sanity Match** | N/A | N/A | **0.9759** |
+| **Tier 1: Index Sanity Match** | N/A | N/A | **0.8605** |
 | **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **1.308 ms** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.254 ms** |
 
 > [!NOTE]
 > **Accounting Notice on Physical vs Logical Memory**:
@@ -31,11 +31,11 @@
 | **Injected Telemetry Profile** | Available RAM: 350 MB (< 600 MB Reserve), Swap Thrashing: 1.4 GB |
 | **FSM Operational Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
-| **Logical KV Capacity Reclaimed** | **11776 KB** |
-| **Pre-Shock Recall (4-bit)** | **0.9759 (Latency: 0.3215 ms)** |
-| **Post-Shock Recall (2-bit)** | **0.8029 (Latency: 1.7669 ms)** |
+| **Logical KV Capacity Reclaimed** | **2736 KB** |
+| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.1233 ms)** |
+| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.4868 ms)** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
-| **Episodic Vector Memory Footprint** | **1119 KB (50% In-Place Compaction)** |
+| **Episodic Vector Memory Footprint** | **553 KB (50% In-Place Compaction)** |
 
 ## 3. Scenario 2B: Controlled Real Host Memory Stress Test (Physical Memory Pressure)
 
@@ -46,9 +46,9 @@
 | **Host Telemetry Sensing Mode** | Live macOS Kernel (`mach_host_self`, `host_statistics64`) |
 | **Autonomous FSM Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
-| **Logical KV Capacity Reclaimed** | **9216 KB** |
+| **Logical KV Capacity Reclaimed** | **2592 KB** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
-| **Process RSS Before / After** | 355 MB / 2439 MB (Delta: 2084 MB) |
+| **Process RSS Before / After** | 169 MB / 2256 MB (Delta: 2087 MB) |
 
 ## 4. Scenario 3: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 

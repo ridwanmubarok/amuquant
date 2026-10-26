@@ -185,7 +185,12 @@ static int get_optimal_pcores() {
 }
 
 int main(int argc, char** argv) {
-    std::string model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
+    std::string model_path = "models/qwen2.5-3b-instruct-q4_k_m.gguf";
+    if (!std::filesystem::exists(model_path)) {
+        if (std::filesystem::exists("models/Meta-Llama-3-8B-Instruct-Q2_K.gguf")) {
+            model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
+        }
+    }
     uint32_t target_tokens = 64;
     std::string scenario = "all";
     std::string policy_arg = "predictive";
@@ -246,6 +251,13 @@ int main(int argc, char** argv) {
     const llama_vocab* vocab = llama_model_get_vocab(model);
     uint32_t embedding_length = model_info.embedding_length > 0 ? model_info.embedding_length : 4096;
     uint32_t block_count = model_info.block_count > 0 ? model_info.block_count : 32;
+
+    uint64_t model_mem_limit = 4800ULL * 1024ULL * 1024ULL;
+    uint64_t model_os_reserved = 600ULL * 1024ULL * 1024ULL;
+    if (embedding_length <= 2560 || block_count <= 36) {
+        model_mem_limit = 2400ULL * 1024ULL * 1024ULL;
+        model_os_reserved = 400ULL * 1024ULL * 1024ULL;
+    }
 
     std::string test_prompt = 
         "Artificial intelligence and computer architecture are converging on resource-constrained devices. "
@@ -493,8 +505,8 @@ int main(int argc, char** argv) {
 
         {
             AMUQuantConfig cfg;
-            cfg.memory_limit_bytes = 4800ULL * 1024ULL * 1024ULL; // Target working budget
-            cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // OS stability headroom
+            cfg.memory_limit_bytes = model_mem_limit; // Adaptive target working budget
+            cfg.os_reserved_bytes  = model_os_reserved;  // OS stability headroom
             cfg.num_layers = block_count;
             cfg.embedding_dim = embedding_length;
             cfg.eval_interval_tokens = 8;  // Lightweight telemetry cadence
@@ -659,8 +671,8 @@ int main(int argc, char** argv) {
         std::cout << "================================================================================\n" << std::endl;
 
         AMUQuantConfig cfg;
-        cfg.memory_limit_bytes = 4800ULL * 1024ULL * 1024ULL;
-        cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;
+        cfg.memory_limit_bytes = model_mem_limit;
+        cfg.os_reserved_bytes  = model_os_reserved;
         cfg.num_layers = block_count;
         cfg.embedding_dim = embedding_length;
         cfg.eval_interval_tokens = 8;
@@ -861,8 +873,8 @@ int main(int argc, char** argv) {
         std::cout << "================================================================================\n" << std::endl;
 
         AMUQuantConfig cfg;
-        cfg.memory_limit_bytes = 4800ULL * 1024ULL * 1024ULL;
-        cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;
+        cfg.memory_limit_bytes = model_mem_limit;
+        cfg.os_reserved_bytes  = model_os_reserved;
         cfg.num_layers = block_count;
         cfg.embedding_dim = embedding_length;
         cfg.eval_interval_tokens = 4; // High telemetry resolution for live pressure sensing

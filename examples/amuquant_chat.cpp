@@ -140,19 +140,19 @@ void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gp
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
+    std::string model_path = "models/qwen2.5-3b-instruct-q4_k_m.gguf";
     if (argc > 1) {
         model_path = argv[1];
     } else {
         std::ifstream f(model_path);
         if (!f.is_open()) {
-            model_path = "models/Meta-Llama-3-8B-Instruct-Q3_K_S.gguf";
+            model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
             std::ifstream f2(model_path);
             if (!f2.is_open()) {
-                model_path = "models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf";
+                model_path = "models/Meta-Llama-3-8B-Instruct-Q3_K_S.gguf";
                 std::ifstream f3(model_path);
                 if (!f3.is_open()) {
-                    model_path = "models/qwen2.5-3b-instruct-q4_k_m.gguf";
+                    model_path = "models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf";
                     std::ifstream f4(model_path);
                     if (!f4.is_open()) {
                         model_path = "models/qwen2.5-0.5b-instruct-q4_k_m.gguf";
