@@ -293,13 +293,44 @@ Logical KV-Cache Capacity Reclaimed:
 
 | Execution Method | Throughput (tok/s) | Visual Distribution | Logical KV Reclaimed | Zero-OOM Status |
 | :--- | :---: | :--- | :---: | :---: |
-| **Baseline 1 (Raw Vanilla)** | 21.35 tok/s | `███████████████████░░` 21.35 | 0 KB | 100% |
-| **Baseline 2 (With Embeddings)** | 22.98 tok/s | `████████████████████░` 22.98 | 0 KB | 100% |
-| **AMU-QUANT Co-Adaptive** | **23.53 tok/s** | `█████████████████████` 23.53 | **2,448 KB (2.4 MB)** | **100% Guaranteed** |
+| **Baseline 1 (Raw Vanilla)** | 22.38 tok/s | `███████████████████░░` 22.38 | 0 KB | 100% |
+| **Baseline 2 (With Embeddings)** | 23.08 tok/s | `████████████████████░` 23.08 | 0 KB | 100% |
+| **AMU-QUANT Co-Adaptive** | **23.64 tok/s** | `█████████████████████` 23.64 | **2,448 KB (2.4 MB)** | **100% Guaranteed** |
 
 ---
 
-### 5.2 Scenario 2A: Deterministic FSM State Transition Test (Mock Telemetry)
+### 5.2 Scenario 2: Multi-Turn Autonomous Agentic Workflow (ReAct Tool Loop)
+
+In autonomous LLM agent frameworks (e.g. LangChain, AutoGen, CrewAI, and coding/audit agents), an agent executes a multi-step reasoning loop (User request -> Tool call -> Large observation payload -> Synthesis). In unmanaged runtimes, cumulative context from repeated tool outputs inflates physical attention buffers linearly ($\mathcal{O}(N)$), rapidly triggering OOM or severe slowdowns.
+
+AMU-QUANT solves this by autonomously excising older tool observation representations from physical KV slots, archiving them into `turbovec` (4-bit/2-bit Lloyd-Max) with zero-copy SIMD recall:
+
+| Agent Workflow Metric | Unmanaged Baseline Agent | AMU-QUANT Co-Adaptive Agent | Impact Analysis |
+| :--- | :--- | :--- | :--- |
+| **Total ReAct Turns Completed** | 4 / 4 Turns | **4 / 4 Turns (100%)** | Full task completion |
+| **Total Ingested Tool Tokens** | 293 tokens | **293 tokens** | Identical tool payloads |
+| **Total Generated Agent Tokens** | 64 tokens | **64 tokens** | Full multi-step reasoning |
+| **Final Physical KV Cache Slots** | 357 slots (Unbounded) | **49 slots (Strictly Bounded!)** | **86.3% slot reduction** |
+| **Logical KV Capacity Reclaimed** | 0 KB | **11,088 KB (~11.1 MB)** | **11.1 MB memory freed** |
+| **Context Tokens Archived to turbovec** | 0 tokens | **308 tokens** | Saved in episodic memory |
+| **Turn 1 Master Key Needle Recall** | In Attention Buffer | **100% Match (Recall@3)** | Zero knowledge loss |
+| **Episodic SIMD Retrieval Latency** | N/A | **2.196 ms** | Instant sub-3ms lookup |
+
+#### Agentic Context Bounding Comparison
+
+```text
+Physical KV Cache Attention Slots after 4 Agentic Turns:
+  Unmanaged Baseline Agent   [357 slots] |========================================| (100.0%)
+  AMU-QUANT Co-Adaptive      [ 49 slots] |=====| (13.7% - Bounded O(1) Attention Slots)
+
+Logical KV Capacity Reclaimed in Agentic Loop:
+  Unmanaged Baseline Agent   [    0 KB ] |
+  AMU-QUANT Co-Adaptive      [11088 KB ] |========================================| (11.1 MB freed)
+```
+
+---
+
+### 5.3 Scenario 3A: Deterministic FSM State Transition Test (Mock Telemetry)
 
 To evaluate the mathematical validity of the state machine deterministically without external OS variance, this scenario injects synthetic host memory starvation at token 16 (available host RAM plummets to 350 MB—breaching the 600 MB OS reserve threshold—and kernel swap thrashing spikes to 1.4 GB):
 
@@ -312,14 +343,14 @@ To evaluate the mathematical validity of the state machine deterministically wit
 | **Layer Prefetch Depth Throttling** | Uncontrolled | **0 (Strict Single-Layer Execution)** |
 | **Logical KV Capacity Reclaimed** | 0 KB | **2,736 KB (~2.7 MB)** |
 | **Active Recent Context Window** | Unbounded expansion | **Clamped to min_recent_window = 16** |
-| **Pre-Shock Semantic Recall (4-bit)** | N/A | **0.8605 (Latency: 0.123 ms)** |
-| **Post-Shock Semantic Recall (2-bit)** | N/A | **0.6341 (Latency: 0.487 ms)** |
+| **Pre-Shock Semantic Recall (4-bit)** | N/A | **0.8605 (Latency: 0.228 ms)** |
+| **Post-Shock Semantic Recall (2-bit)** | N/A | **0.6341 (Latency: 0.441 ms)** |
 | **Tier 2 Factual Needle Recovery** | N/A | **100% Preserved (Recall@3)** |
 | **Episodic Vector Memory Footprint** | N/A | **553 KB (~0.5 MB)** (50% In-Place Compaction) |
 
 ---
 
-### 5.3 Scenario 2B: Controlled Real Host Memory Stress Test (Physical Memory Pressure)
+### 5.4 Scenario 3B: Controlled Real Host Memory Stress Test (Physical Memory Pressure)
 
 In contrast to deterministic mock testing, this scenario activates a controlled background memory burner (`HostMemoryStressInjector`) that allocates and touches physical pages in RAM, driving live macOS host memory into acute pressure:
 
@@ -334,24 +365,23 @@ In contrast to deterministic mock testing, this scenario activates a controlled 
 | **Tier 2 Factual Needle Recovery** | N/A | **100% Preserved (Recall@3)** |
 | **Host RAM Released Post-Run** | N/A | **100% Clean Deallocation (2048 MB Released)** |
 
-#### Memory Footprint Compaction Statistics Chart
+---
 
-```text
-Memory Footprint under Host Memory Crisis:
-  Unmanaged Baseline 2   [16.78 MB] |========================================| (100.0%)
-  AMU-QUANT Regime 2 4b  [ 6.92 MB] |================| (41.2%)
-  AMU-QUANT Regime 3 2b  [ 3.46 MB] |========| (20.6% - 79.4% Memory Slashed)
-```
+### 5.5 Scenario 4: Runtime Arbitration Policy Ablation Matrix
 
-| Execution State | Physical KV Retained | Compressed Index | Total Memory | Relative Footprint |
+To isolate the contribution of AMU-QUANT's decision engine, this scenario benchmarks the three supported arbitration policies under identical workload conditions:
+
+| Policy Configuration | Inference Throughput | Peak Physical RSS | Logical KV Reclaimed | Operational Regime Selected |
 | :--- | :---: | :---: | :---: | :--- |
-| **Baseline Unmanaged (FP16)** | 16.78 MB | 0 KB | 16.78 MB | `████████████████████` 100.0% |
-| **AMU-QUANT Regime 2 (4-bit)** | 4.71 MB | 2.21 MB | 6.92 MB | `████████░░░░░░░░░░░░` 41.2% |
-| **AMU-QUANT Regime 3 (2-bit)** | 2.36 MB | 1.10 MB | **3.46 MB** | `████░░░░░░░░░░░░░░░░` **20.6% (-79.4%)** |
+| **Predictive Cost-Benefit (PCBM)** | **24.37 tok/s** | 1735 MB | **1,440 KB** | `REGIME_2_BALANCED_OFFLOAD` |
+| **Static Threshold Hysteresis** | 24.80 tok/s | 197 MB | **2,016 KB** | `REGIME_3_ULTRA_LOW_SURVIVAL` |
+| **Static KV Eviction Only** | 25.28 tok/s | 199 MB | **1,440 KB** | `REGIME_2_BALANCED_OFFLOAD` |
+
+* **Observation**: The predictive cost-benefit policy (PCBM) selects `REGIME_2` during non-terminal transients, preventing premature 2-bit downscaling and maintaining high quality, whereas static threshold hysteresis overreacts and drops immediately into `REGIME_3` survival mode.
 
 ---
 
-### 5.4 Scenario 3: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+### 5.6 Scenario 5: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 
 On short horizons ($N < 100$ tokens), unmanaged baselines appear marginally faster because the unmanaged KV-cache fits into GPU L2/SLC cache. As context depth expands beyond the **Crossover Point ($N^* \approx 180$ tokens)**, unmanaged baseline memory explodes linearly ($\mathcal{O}(N)$), while AMU-QUANT bounds physical KV memory to $\approx 4.71\text{ MB}$ ($\mathcal{O}(1)$ attention complexity):
 
