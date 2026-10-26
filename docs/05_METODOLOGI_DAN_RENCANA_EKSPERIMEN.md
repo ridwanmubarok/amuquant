@@ -17,15 +17,17 @@ Pengujian empiris dilakukan pada dua konfigurasi perangkat keras yang merepresen
 | **Set Instruksi SIMD** | ARM NEON / AVX2 / AVX-512 | AVX2 / ARM NEON |
 | **Sistem Operasi** | macOS Sequoia (Darwin 24) / Ubuntu 24.04 LTS (Kernel 6.8) | Ubuntu 24.04 LTS / macOS Ventura |
 
-### 1.2 Model Bahasa yang Diuji
-Seluruh model diperoleh dari repositori resmi Hugging Face dalam format **GGUF** dengan presisi kuantisasi bobot **Q4_K_M**:
+### 1.2 Model Bahasa yang Diuji (Spektrum Lintas Skala)
+Seluruh model diperoleh dalam format **GGUF** (presisi kuantisasi bobot **Q4_K_M** dan **Q2_K**), mencakup spektrum parameter yang digeneralisasikan:
 
-1. **Skala 8B:** `Meta-Llama-3-8B-Instruct` (Ukuran file: $\approx 4{,}92\text{ GB}$)
-   * Berfungsi sebagai batas referensi (*baseline sanity check*), di mana model muat di RAM 16 GB namun menekan RAM 8 GB saat konteks membesar.
-2. **Skala 14B:** `Qwen2.5-14B-Instruct` (Ukuran file: $\approx 8{,}99\text{ GB}$)
-   * Merepresentasikan kondisi kritis pada RAM 8 GB (bobot > RAM) dan kondisi rentan pada RAM 16 GB saat konteks mencapai 8K–16K token.
-3. **Skala 32B:** `Qwen2.5-32B-Instruct` / `DeepSeek-R1-Distill-Qwen-32B` (Ukuran file: $\approx 19{,}8\text{ GB}$)
-   * Model skala besar yang melampaui kapasitas RAM fisik dari kedua node pengujian (16 GB maupun 8 GB), sehingga keberhasilan eksekusi sepenuhnya bergantung pada efektivitas streaming dan kompresi memori.
+1. **Skala Kompak (Sub-3B):** `Qwen2.5-0.5B-Instruct`, `Qwen2.5-1.5B-Instruct`, dan `Qwen2.5-3B-Instruct`
+   * Menguji ketahanan inferensi pada lingkungan perangkat dengan batas RAM sangat ketat (misal 4 GB–8 GB) saat konteks penalaran diperpanjang hingga batas maksimum (8K–32K token).
+2. **Skala Menengah (7B–8B):** `Meta-Llama-3-8B-Instruct` (Ukuran file: $\approx 4{,}92\text{ GB}$) dan `Qwen2.5-7B-Instruct`
+   * Berfungsi sebagai batas transisi di mana bobot model muat di RAM 16 GB namun menekan RAM 8 GB, dan dengan cepat memicu OOM saat KV-Cache membesar.
+3. **Skala Besar (14B–32B):** `Qwen2.5-14B-Instruct` ($\approx 8{,}99\text{ GB}$) dan `Qwen2.5-32B-Instruct` / `DeepSeek-R1-Distill-Qwen-32B` ($\approx 19{,}8\text{ GB}$)
+   * Model skala besar yang melampaui kapasitas RAM fisik dari node pengujian (8 GB maupun 16 GB), membuktikan peran koordinasi ko-adaptif antara streaming bobot aktif dan kompresi memori `turbovec`.
+4. **Skala Sangat Besar (70B+ Eksploratif):** `Meta-Llama-3-70B-Instruct` (Q2_K / Q4_K_M)
+   * Menguji batas ekstrem rasio kapasitas bobot terhadap RAM pada komputasi *layer-by-layer pure streaming* dengan pengarsipan konteks penuh di `turbovec`.
 
 ---
 

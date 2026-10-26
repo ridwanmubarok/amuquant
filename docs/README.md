@@ -12,7 +12,7 @@ Dokumentasi ini memuat spesifikasi ilmiah, rancangan matematis, arsitektur siste
 | **02** | [**Arsitektur Sistem dan Alur Kerja**](02_ARSITEKTUR_SISTEM.md) | Rancangan 4 subsistem (Layer Manager, KV Surgery, FFI Bridge, Controller), alur *zero-copy*, dan penanganan *thread-safety*. |
 | **03** | [**Model Matematika dan Kontroler Ko-Adaptif**](03_MODEL_MATEMATIKA_DAN_KONTROLER.md) | Pertidaksamaan ekuilibrium memori ganda, formula $\Phi_t$, analisis histeresis, dan pseudocode algoritma penjadwalan. |
 | **04** | [**Desain Jembatan turbovec-ffi (C-ABI)**](04_DESAIN_TURBOVEC_FFI.md) | Header C-ABI `turbovec_ffi.h`, implementasi Rust `ffi.rs`, rotasi ortogonal acak, kuantisasi Lloyd-Max, dan SIMD. |
-| **05** | [**Metodologi dan Rencana Eksperimen**](05_METODOLOGI_DAN_RENCANA_EKSPERIMEN.md) | Setup perangkat keras (RAM 8 GB dan 16 GB), model benchmark (8B, 14B, 32B), 4 baseline, 3 skenario uji, dan metrik kuantitatif. |
+| **05** | [**Metodologi dan Rencana Eksperimen**](05_METODOLOGI_DAN_RENCANA_EKSPERIMEN.md) | Setup perangkat keras (RAM 8 GB dan 16 GB), spektrum model uji lintas-skala (sub-3B, 7B/8B, 14B, 32B), 4 baseline, 3 skenario uji, dan metrik kuantitatif. |
 | **06** | [**Tinjauan Pustaka dan Komparasi State-of-the-Art**](06_TINJAUAN_PUSTAKA_DAN_REFERENSI.md) | Kajian pustaka kritis (AirLLM, llama.cpp, StreamingLLM, H2O, ThinKV, Lethe, TurboQuant) dan analisis kebaruan komparatif. |
 
 ---

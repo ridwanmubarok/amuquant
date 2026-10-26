@@ -4,13 +4,25 @@
 
 ## 1. Intisari Ilmiah (Abstract)
 
-Eksekusi model bahasa berskala besar (*Large Language Models* / LLM) berkapasitas 14 miliar hingga 32 miliar parameter (14B–32B) secara lokal pada perangkat komputasi personal berkendala memori (RAM fisik 8 GB–16 GB) menghadapi hambatan fisik fundamental berupa perebutan ruang memori (*memory contention*) antara dua sumber alokasi utama:
-1. **Memori Bobot Statis (*Static Model Weights*):** Model 32B dalam kuantisasi 4-bit (format GGUF Q4_K_M) mengonsumsi sekitar $19{,}5\text{ GB}$ ruang alamat fisik—melebihi kapasitas RAM laptop standar.
-2. **Memori Konteks Dinamis (*Dynamic Key-Value Cache*):** Pada fase *autoregressive decoding*, memori KV-Cache tumbuh secara linier terhadap panjang konteks ($T$). Pada model 32B dengan $L=64$ layer dan panjang konteks $8192$ token, KV-Cache membutuhkan ruang $\approx 10{,}5\text{ GB}$.
+Menjalankan model bahasa berskala besar (*Large Language Model* / LLM) secara lokal pada perangkat komputer jinjing (*laptop*) standar dengan kapasitas RAM terbatas (misalnya 8 GB–16 GB) menghadapi satu kendala mendasar: **memori cepat habis saat teks atau penalaran yang dihasilkan semakin panjang**. Di dalam arsitektur komputer, alokasi memori fisik (RAM) oleh LLM terbagi menjadi dua komponen utama yang saling berkompetisi memperebutkan ruang memori:
 
-Pendekatan *layer-wise streaming* konvensional seperti AirLLM ([Lyogavin, 2024](https://github.com/lyogavin/airllm)) atau *Memory-Mapped I/O* (`mmap`) pada `llama.cpp` ([Gerganov et al., 2026](https://github.com/ggml-org/llama.cpp)) memiliki kelemahan kritis: seluruh KV-Cache dipaksa menetap di RAM fisik. Pertumbuhan KV-Cache mendesak *page cache buffer* yang dibutuhkan kernel sistem operasi untuk membaca bobot layer dari SSD, memicu *major page fault storm*, kemacetan I/O (*swap thrashing*), dan terminasi oleh *Out-of-Memory (OOM) Killer*. Di sisi lain, metode pemangkasan KV-cache modern (StreamingLLM, H2O, ThinKV, Lethe) membuang token lama secara permanen (*evict-to-trash*), menimbulkan *permanent context loss*, serta sepenuhnya buta terhadap telemetri memori sistem operasi.
+1. **Bobot Model (*Model Weights*):** Ukuran file model yang dimuat ke dalam memori (misalnya dalam format terkuantisasi GGUF) memakan porsi besar RAM fisik sejak inisialisasi awal. Digabungkan dengan pemakaian memori kernel sistem operasi, sisa ruang memori bebas pada perangkat menjadi sangat sempit bahkan sebelum proses generasi teks dimulai.
+2. **Memori Konteks (*Key-Value Cache* / KV-Cache):** Saat model menghasilkan kata demi kata (*autoregressive decoding*), sistem harus menyimpan riwayat status representasi tersembunyi di dalam KV-Cache. Semakin panjang teks atau penalaran bertingkat yang dihasilkan (mencapai ribuan token), ukuran KV-Cache membengkak secara linier dan memakan tambahan ruang RAM yang besar.
 
-**AMU-QUANT** mengusulkan arsitektur inferensi ko-adaptif berbasis C++17 dan Rust yang menyatukan *layer-wise weight streaming* terkontrol pada file `.gguf` tunggal dengan kompresi konteks *in-memory* berkecepatan tinggi menggunakan pustaka `turbovec` ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)), implementasi dari algoritma Google Research TurboQuant ([Zandieh et al., ICLR 2026](https://arxiv.org/abs/2504.19874)). Melalui jembatan *Foreign Function Interface* (C-ABI `turbovec-ffi`), blok token yang dipangkas dari KV-Cache `llama.cpp` diarsipkan ke dalam indeks vektor terkompresi 4-bit ($\approx 7{,}8\times$) atau 2-bit ($\approx 15{,}5\times$) secara *zero-copy*. Ruang RAM yang dihemat dialokasikan kembali secara dinamis untuk memperluas jendela *prefetching* bobot layer pada `mmap` menggunakan panggilan kernel `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)`.
+Ketika ukuran KV-Cache membesar atau ada aplikasi lain (seperti peramban web atau editor kode) yang dibuka bersamaan, total kebutuhan memori melewati batas fisik RAM perangkat. Akibatnya, sistem operasi memindahkan paksa sebagian memori bobot model dari RAM ke penyimpanan SSD (*swapping / page thrashing*). Hal ini membuat kecepatan generasi token turun drastis atau proses dihentikan mendadak oleh sistem operasi (*Out-of-Memory / OOM Killer*). Masalah ini bersifat umum dan terdistribusi di berbagai skala model: dari model kelas kompak (sub-3B), menengah (7B–8B), besar (14B–32B), hingga sangat besar (70B).
+
+Pendekatan terdahulu memiliki empat kelemahan sistemik:
+* **Sistem Layer-Streaming Tidak Mengurus Pembengkakan KV-Cache:** Metode seperti AirLLM ([Lyogavin, 2024](https://github.com/lyogavin/airllm)) atau fitur `mmap` pada `llama.cpp` ([Gerganov et al., 2026](https://github.com/ggml-org/llama.cpp)) mampu membaca bobot bertahap per layer dari SSD, namun membiarkan KV-Cache terus membesar di RAM hingga akhirnya tetap kehabisan memori pada obrolan panjang.
+* **Pemotongan Konteks Konvensional Menimbulkan Kehilangan Informasi (*Evict-to-Trash*):** Metode seperti StreamingLLM ([Xiao et al., ICLR 2024](https://arxiv.org/abs/2309.17453)), H2O ([Zhang et al., NeurIPS 2023](https://arxiv.org/abs/2306.14048)), ThinKV ([ICLR 2026](https://arxiv.org/abs/2510.01290)), dan Lethe ([AAAI 2026](https://arxiv.org/abs/2511.12612)) menghapus token lama dari KV-Cache secara permanen (*evict-to-trash*) sehingga informasi penting hilang selamanya, serta sepenuhnya buta terhadap sisa ketersediaan RAM sistem operasi.
+* **Kompresi TurboQuant di llama.cpp Masih Bersifat Statis:** Penerapan kuantisasi vektor tanpa pelatihan TurboQuant ([Zandieh et al., ICLR 2026](https://arxiv.org/abs/2504.19874)) pada cabang komunitas `llama.cpp` ([TheTom, 2026](https://github.com/TheTom/llama-cpp-turboquant); [AmesianX, 2026](https://github.com/AmesianX/TurboQuant); [Issue #20977](https://github.com/ggml-org/llama.cpp/issues/20977); [PR #21038](https://www.google.com/search?q=https://github.com/ggml-org/llama.cpp/pull/21038)) hanya diatur di awal sebelum model berjalan, belum mampu menyesuaikan diri secara otomatis saat RAM tiba-tiba penuh di tengah generasi.
+* **Pustaka turbovec Belum Terhubung ke Mesin C++ (llama.cpp):** Pustaka `turbovec` ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)) dalam bahasa Rust mampu memadatkan vektor hingga $7{,}8\times$ (mode 4-bit) dan $15{,}5\times$ (mode 2-bit) dalam mikrodetik via SIMD CPU, namun baru mendukung Rust dan Python, serta belum pernah dihubungkan ke `llama.cpp` (C++) untuk menampung KV-Cache yang terpotong.
+
+**AMU-QUANT** mengusulkan algoritma inferensi ko-adaptif berbasis C++17 dan Rust yang memantau sisa RAM perangkat saat LLM menghasilkan teks. Jika RAM mulai menipis, AMU-QUANT memotong token lama dari KV-Cache di `llama.cpp` agar ruang RAM langsung lega, lalu memindahkan representasi vektor token tadi ke dalam indeks terkompresi `turbovec` (4-bit atau 2-bit) via jembatan C-ABI FFI (`turbovec-ffi`) secara *zero-copy*. Pada saat yang sama, AMU-QUANT mengatur pelepasan halaman memori layer model yang sudah selesai dihitung via panggilan kernel `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` agar alokasi bobot model dan KV-Cache tidak saling berebut RAM.
+
+Dari sudut pandang **Sains Data (*Data Science*)** dan **Pemrosesan Bahasa Alami (*Natural Language Processing*)**, penelitian ini berfokus pada:
+1. **Optimasi representasi data vektor berdimensi tinggi** melalui kuantisasi skalar Lloyd-Max (4-bit dan 2-bit).
+2. **Pemodelan prediktif deret waktu (*time-series forecasting*)** pada data telemetri memori sistem untuk mendeteksi akselerasi konsumsi memori sebelum terjadi *swapping*.
+3. **Evaluasi statistik terhadap kualitas distribusi probabilitas token (*Perplexity* / PPL)** dan akurasi temu kembali informasi (*Information Retrieval* / Recall@K).
 
 ---
 
@@ -157,7 +169,7 @@ TurbovecStatus turbovec_free(TurbovecIndexHandle* handle);
 
 ### 7.1 Matriks Skenario Uji
 1. **Skenario 1 — Skalabilitas Ukuran Model dan Konteks (Clean Run):**  
-   Pengujian model Llama-3-8B, Qwen-2.5-14B, dan Qwen-2.5-32B (Q4_K_M) pada variasi panjang konteks 2K, 4K, 8K, dan 16K token di lingkungan bersih.
+   Pengujian spektrum model lintas-skala (model kompak sub-3B, menengah 7B/8B, besar 14B/32B, hingga 70B dalam kuantisasi Q4_K_M) pada variasi panjang konteks 2K, 4K, 8K, dan 16K token di lingkungan bersih untuk mengevaluasi titik saturasi OOM.
 2. **Skenario 2 — Injeksi Tekanan Memori OS Dinamis (Stress Test):**  
    Pemberian beban alokasi memori eksternal sintetik (2 GB–6 GB) secara mendadak saat fase autoregressive decoding berlangsung untuk menguji respons adaptif rejim AMU-QUANT dan pencegahan OOM.
 3. **Skenario 3 — Ketahanan Konteks (Needle-in-a-Haystack dan PPL):**  
@@ -214,6 +226,6 @@ TurbovecStatus turbovec_free(TurbovecIndexHandle* handle);
 ## 9. Penulis dan Afiliasi Akademik
 
 * **Nama Pengusul:** Mahasiswa Tugas Akhir  
-* **Program Studi:** Teknik Informatika / Ilmu Komputer / Teknik Elektro  
-* **Fokus Penelitian:** *High-Performance Computer Systems for Deep Learning*  
+* **Program Studi:** Sains Data / Ilmu Komputer / Teknik Informatika  
+* **Fokus Penelitian:** *Data Science, Natural Language Processing, & High-Performance Systems for Deep Learning*  
 * **Tahun Akademik:** 2026/2027
