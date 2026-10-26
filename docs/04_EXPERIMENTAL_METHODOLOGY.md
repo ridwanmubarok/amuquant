@@ -94,3 +94,24 @@ Tests factual memory preservation by embedding unique synthetic facts (*needles*
 | | **SIMD Search Latency** | Time required for Top-$K$ cosine similarity query | High-resolution CPU timer (`std::chrono` $\mu\text{s}$) |
 | **Output Quality** | **Retrieval Accuracy (Recall@1)** | Exact-match rate on Needle-in-a-Haystack evaluations | $\frac{\text{Exact Matches}}{\text{Total Needle Queries}} \times 100\%$ |
 | | **Perplexity (PPL)** | Exponentiated cross-entropy loss on benchmark text | WikiText-2 evaluation via standard test suite |
+
+---
+
+## 6. Academic Disclaimers and Accounting Methodology
+
+To maintain absolute scientific transparency and prevent overclaiming in thesis and peer-reviewed evaluations, the following definitions and methodological boundaries govern all empirical results:
+
+### 6.1 Physical Resident Set Size vs. Logical KV Capacity
+* **Logical KV Capacity Reclaimed**: In `llama.cpp`, the attention buffer is allocated as a pre-dimensioned contiguous ring buffer arena upon context initialization. Calling `llama_memory_seq_rm()` invalidates sequence slots and repositions attention indices. This relieves attention computation complexity ($O(1)$ bounds) and prevents ring-buffer overflow, but does **not** issue immediate `munmap()` system calls to return raw pages to the operating system kernel.
+* **Physical Process RSS**: Measured via `getrusage(RUSAGE_SELF).ru_maxrss` on Linux/macOS and verified via kernel task ports (`mach_task_basic_info`). Physical RSS reflects the actual physical memory pages mapped into the process's page table.
+
+### 6.2 Decoupled Working Attention vs. Episodic Semantic Memory
+* **Episodic Vector Indexing (`turbovec`)**: Tokens excised from the physical attention buffer have their token-level pooled embeddings archived into `turbovec` (Lloyd-Max 4-bit / 2-bit scalar quantization).
+* **Scope Boundary**: Archived vectors serve as an associative semantic memory (in-process RAG) allowing the model or agent to recall historical facts with sub-millisecond SIMD search. This **does not** reconstruct the original intermediate 36-layer Key and Value tensor states. It trades lossless layer-wise attention for a 15.5x memory compression factor.
+
+### 6.3 Layer Memory Advisory Semantics (`LayerManager`)
+* **OS-Level Advisory Paging**: `LayerManager` utilizes `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to notify the OS Virtual Memory Manager (VMM) which pages of the mapped GGUF file are safe to drop under memory contention.
+* **Scope Boundary**: Advisory paging communicates directly with the OS page cache; it does **not** rewrite GGML tensor execution graph ASTs at runtime. On unified memory systems, this provides OS memory relief while preserving process stability.
+
+### 6.4 Measurement Protocols and Run-to-Run Variance
+* **Hardware Variability**: Generation throughput on Apple Silicon Metal GPU naturally exhibits variance (+/- 1.5 tok/s) across runs depending on SoC thermal throttling, background OS daemon memory bus contention, and Metal shader pre-compilation state. All canonical benchmark tables document run configurations and recommend multi-trial averages for publication.

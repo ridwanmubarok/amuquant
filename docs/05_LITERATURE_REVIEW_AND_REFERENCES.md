@@ -70,9 +70,13 @@ AMU-QUANT bridges the disciplines of Data Science and Natural Language Processin
 | **Online Context Compression** | None | Naive Pruning | None (or Static) | Yes (TurboQuant) | **Yes (TurboQuant via `turbovec`)** |
 | **Compression Ratio** | 1x (FP16) | Permanent Deletion | 1x / Static | 7.8x (4b) & 15.5x (2b) | **Dynamic: 1x $\to$ 7.8x $\to$ 15.5x** |
 | **Fate of Pruned Tokens** | Unpruned | Discarded (*Lost forever*) | Unpruned | Stored in Index | **Archived (*Evict-to-Index*)** |
-| **Past Context Restoration** | N/A | Impossible | N/A | Vector DB RAG | **SIMD Retrieval (<0.25 ms)** |
+| **Past Context Restoration** | N/A | Impossible | N/A | Vector DB RAG | **Episodic Associative SIMD Recall** |
 | **OS Memory Awareness** | None | None | Passive OS Handling | None | **Yes (Predictive Metric $\Phi_t$)** |
 | **Inference Survival** | Slow ($\approx 0.05$ tok/s) | High risk of OOM | Crash OOM on long contexts | N/A | **100% Zero-OOM Survival** |
+
+> [!NOTE]
+> **Nature of Context Restoration**:
+> Context restoration in AMU-QUANT operates as an episodic associative memory via vectorized semantic recall in `turbovec`. It retrieves semantically relevant past token representations using SIMD cosine similarity, enabling in-process RAG rather than attempting exact bitwise reconstruction of intermediate multi-layer Key/Value attention tensors.
 
 ---
 

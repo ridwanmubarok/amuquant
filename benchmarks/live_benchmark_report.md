@@ -10,18 +10,27 @@
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
 | **Tokens Generated** | 64/64 | 64/64 | 64/64 |
-| **Peak Physical RSS** | 166 MB | 195 MB | 197 MB |
-| **Empirical Process RSS Delta** | -9 MB | 40 MB | 39 MB |
-| **Inference Throughput** | 22.78 tok/s | 25.61 tok/s | 25.22 tok/s |
+| **Peak Physical RSS** | 171 MB | 208 MB | 201 MB |
+| **Empirical Process RSS Delta** | 4 MB | 32 MB | 38 MB |
+| **Inference Throughput** | 22.67 tok/s | 23.10 tok/s | 25.46 tok/s |
 | **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **2448 KB** |
 | **Context Tokens Safely Archived** | 0 | 0 | **68** |
 | **Tier 1: Index Sanity Match** | N/A | N/A | **0.8605** |
 | **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **0.397 ms** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.586 ms** |
+
+### Empirical Measurement Protocol, Repeatability & Variance Analysis
+
+> [!NOTE]
+> **Run-to-Run Variance on Apple Silicon Metal GPU**:
+> Single-run generation speeds naturally fluctuate across runs (typically 22.7 tok/s to 25.6 tok/s) due to:
+> 1. macOS Dynamic Power & Thermal Throttling: Clock frequencies adjust dynamically depending on SoC temperature.
+> 2. Unified Memory Bus Contention: Host background daemons sharing unified RAM bandwidth.
+> 3. Metal GPU Pipeline & Shader Cache: Warm cache states execute faster than initial cold invocations.
 
 > [!NOTE]
 > **Accounting Notice on Physical vs Logical Memory**:
-> `Logical KV Capacity Reclaimed` reflects uncompressed sequence slots pruned from the attention buffer. > `llama.cpp` pre-allocates a contiguous ring buffer pool for sequence positions, which means KV eviction prevents > buffer expansion and memory exhaustion (bounded physical RSS) rather than issuing immediate heap deallocation calls to the OS.
+> `Logical KV Capacity Reclaimed` reflects uncompressed sequence slots pruned from the attention buffer. `llama.cpp` pre-allocates a contiguous ring buffer pool for sequence positions, which means KV eviction prevents buffer expansion and memory exhaustion (bounded physical RSS) rather than issuing immediate heap deallocation calls (`munmap`) to the OS.
 
 ## 2. Scenario 2: Multi-Turn Autonomous Agentic Workflow (ReAct Tool Loop)
 
@@ -34,7 +43,7 @@
 | **Logical KV Capacity Reclaimed** | 0 KB | **11088 KB** |
 | **Context Tokens Archived to turbovec** | 0 | **308 tokens** |
 | **Turn 1 Master Key Recall** | In Attention Buffer | **100% Match (Recall@3)** |
-| **Episodic SIMD Retrieval Latency** | N/A | **1.234 ms** |
+| **Episodic SIMD Retrieval Latency** | N/A | **1.752 ms** |
 
 ## 3. Scenario 3A: Deterministic FSM State Transition Test (Mock Telemetry)
 
@@ -45,8 +54,8 @@
 | **FSM Operational Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
 | **Logical KV Capacity Reclaimed** | **2736 KB** |
-| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.1567 ms)** |
-| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.5242 ms)** |
+| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.2346 ms)** |
+| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.4024 ms)** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
 | **Episodic Vector Memory Footprint** | **553 KB (50% In-Place Compaction)** |
 
@@ -61,17 +70,36 @@
 | **Dynamic Requantization** | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
 | **Logical KV Capacity Reclaimed** | **2592 KB** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
-| **Process RSS Before / After** | 177 MB / 2246 MB (Delta: 2069 MB) |
+| **Process RSS Before / After** | 181 MB / 2268 MB (Delta: 2087 MB) |
 
 ## 5. Scenario 4: Runtime Arbitration Policy Ablation Matrix
 
 | Policy Configuration | Target Throughput | Peak Physical RSS | KV Reclaimed | Final Regime |
 | :--- | :--- | :--- | :--- | :--- |
-| **Predictive Cost-Benefit (PCBM)** | 23.30 tok/s | 1669 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
-| **Static Threshold Hysteresis** | 24.00 tok/s | 1285 MB | **2016 KB** | REGIME_3_ULTRA_LOW_SURVIVAL |
-| **Static KV Eviction Only** | 24.55 tok/s | 1285 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
+| **Predictive Cost-Benefit (PCBM)** | 25.79 tok/s | 2269 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
+| **Static Threshold Hysteresis** | 24.49 tok/s | 2269 MB | **2016 KB** | REGIME_3_ULTRA_LOW_SURVIVAL |
+| **Static KV Eviction Only** | 23.25 tok/s | 2269 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
 
-## 6. Scenario 5: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+## 6. Scenario 6: Extended Horizon (256 Tokens) & Multi-Needle Retrieval
+
+| Extended Horizon Metric | Measurement | Impact Analysis |
+| :--- | :--- | :--- |
+| **Target Horizon** | 256/256 tokens | 4x Nominal Horizon |
+| **Inference Throughput** | 22.41 tok/s | Sustained Decoding Velocity |
+| **Peak Physical RSS** | 2311 MB | Bounded Memory Ceiling |
+| **Logical KV Capacity Reclaimed** | **11376 KB** | Buffer Overflow Prevented |
+| **Context Tokens Archived** | **316 tokens** | In-Memory Episodic Storage |
+| **Final Physical KV Slots** | **66 slots** | Attention Bounded to O(1) |
+
+### Multi-Needle Factual Retrieval Matrix (Cross-Temporal Evaluation)
+
+| Target Needle | Context Position | Recall@1 | Recall@3 | Cosine Score | Retrieval Latency |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Needle 1 (Initialization Passkey)** (`AegisOmega-90412`) | Token 7 | 100% Match | 100% Match | 0.8273 | 3.252 ms |
+| **Needle 2 (Security Certificate)** (`SecCert-88319`) | Token 43 | 100% Match | 100% Match | 0.9257 | 2.455 ms |
+| **Needle 3 (Database Nonce)** (`NonceDelta-44102`) | Token 90 | 100% Match | 100% Match | 0.9051 | 2.578 ms |
+
+## 7. Scenario 7: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 
 | Token Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
 | :--- | :--- | :--- | :--- | :--- |
