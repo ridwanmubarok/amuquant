@@ -1,18 +1,18 @@
-# AMU-QUANT Live Empirical Benchmark Report
+# AMU-QUANT Live Empirical Benchmark Report (3-Way Methodological Parity)
 
-- **Date**: Oct 26 2026 18:04:15
 - **Model**: `models/Meta-Llama-3-8B-Instruct-Q2_K.gguf`
-- **Platform**: macOS (Apple Silicon / Darwin VM)
-- **Threads**: 4 CPU P-Cores
+- **Architecture**: 32 Layers, Dim 4096
+- **Target Generation Horizon**: 32 tokens
 
-| Metric | Baseline (Vanilla llama.cpp) | AMU-QUANT Co-Adaptive Engine |
-| :--- | :--- | :--- |
-| **Completion Status** | 100% Completed | 100% Completed (Zero-OOM) |
-| **Generated Tokens** | 32 tokens | 32 tokens |
-| **Throughput** | 2.5 tok/s | 8.0 tok/s |
-| **Peak Resident RAM (RSS)** | 361 MB | 383 MB |
-| **Tokens Safely Archived** | 0 (Unmanaged) | 57 tokens |
-| **Context Retrieval Score** | N/A | 0.9 (Cosine Match) |
-| **SIMD Retrieval Latency** | N/A | 0.6 ms |
+| Evaluation Metric | Baseline 1 (Raw Vanilla) | Baseline 2 (With Embeddings) | AMU-QUANT Co-Adaptive Engine |
+| :--- | :--- | :--- | :--- |
+| **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
+| **Tokens Generated** | 32/32 | 32/32 | 32/32 |
+| **Peak Physical RSS** | 370 MB | 394 MB | 397 MB |
+| **Inference Throughput** | 2.71 tok/s | 11.45 tok/s | 11.22 tok/s |
+| **KV Memory Reclaimed** | 0 KB | 0 KB | 7680 KB |
+| **Tokens Safely Archived** | 0 | 0 | 60 |
+| **Semantic Recall Score** | N/A | N/A | 0.8468 |
+| **SIMD Retrieval Latency** | N/A | N/A | 0.510 ms |
 
-Generated automatically by `live_benchmark` executable.
+Generated automatically by `live_benchmark` on Apple Silicon / Metal.

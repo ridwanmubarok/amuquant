@@ -21,9 +21,10 @@ struct RealisticKVCache {
     std::vector<int32_t> slot_positions;
     size_t total_reclaimed_bytes{0};
 
-    void append_token(int32_t pos) {
+    void append_token() {
+        int32_t next_pos = slot_positions.empty() ? 0 : (slot_positions.back() + 1);
         token_slots.push_back(std::vector<uint16_t>(embedding_dim, 0x3C00)); // 1.0 in FP16
-        slot_positions.push_back(pos);
+        slot_positions.push_back(next_pos);
     }
 
     void seq_rm(int32_t p0, int32_t p1) {
@@ -127,7 +128,8 @@ int main() {
     
     // Simulate initial sequence growth up to 40 tokens
     for (uint32_t t = 0; t < 40; ++t) {
-        kv_cache.append_token(t);
+        kv_cache.append_token();
+        engine.append_token(t);
     }
     size_t pre_abort_slots = kv_cache.active_slots();
     EvictionRange test_range = kv_surgeon->plan_eviction(40, cfg.attention_sink_tokens, cfg.recent_window_tokens);
@@ -136,6 +138,7 @@ int main() {
     bool eviction_success = kv_surgeon->execute_eviction(test_range, null_extractor, seq_rm, seq_add);
     assert(!eviction_success); // Must fail atomically!
     assert(kv_cache.active_slots() == pre_abort_slots); // Zero slots pruned
+    assert(kv_surgeon->get_token_map().physical_size() == pre_abort_slots); // TokenIndexMap intact
     std::cout << "  - Atomic Archiving Safety (Null Extractor Aborted Without Pruning): OK" << std::endl;
 
     // 4. Autoregressive Simulation with Dynamic Telemetry and Layer madvise Paging
@@ -143,7 +146,8 @@ int main() {
     telemetry->set_mock_mode(true);
 
     for (uint32_t t = 40; t < TOTAL_STEPS; ++t) {
-        kv_cache.append_token(t);
+        kv_cache.append_token();
+        engine.append_token(t);
 
         // Populate random context representation
         if (t != NEEDLE_POS) {
@@ -179,7 +183,10 @@ int main() {
         }
         telemetry->set_mock_stats(s);
 
-        StepDecision dec = engine.step_token(t, t + 1, valid_extractor, seq_rm, seq_add);
+        StepDecision dec = engine.step_token(t, static_cast<uint32_t>(kv_cache.active_slots()), valid_extractor, seq_rm, seq_add);
+
+        // Verify TokenIndexMap synchronization with physical KV-cache
+        assert(kv_surgeon->get_token_map().physical_size() == kv_cache.active_slots());
 
         if (t == 50) {
             assert(dec.regime == Regime::REGIME_2_BALANCED_OFFLOAD);

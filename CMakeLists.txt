@@ -21,17 +21,24 @@ endif()
 # Header Include Directories
 include_directories(include)
 
-# Optional Cargo Integration for turbovec-ffi Rust Crate
-find_program(CARGO_BIN cargo)
-if(CARGO_BIN)
-    message(STATUS "Found Cargo: ${CARGO_BIN}. Enabled turbovec-ffi Rust build target.")
+# Backend Configuration: Canonical Native C++17 SIMD (default) vs Optional Rust FFI
+option(AMUQUANT_USE_RUST_BACKEND "Link turbovec-ffi Rust static library instead of native C++ SIMD backend" OFF)
+
+if(AMUQUANT_USE_RUST_BACKEND)
+    find_program(CARGO_BIN cargo)
+    if(NOT CARGO_BIN)
+        message(FATAL_ERROR "AMUQUANT_USE_RUST_BACKEND is ON, but 'cargo' was not found in PATH. Install Rust or build with -DAMUQUANT_USE_RUST_BACKEND=OFF.")
+    endif()
+    message(STATUS "Configuring AMU-QUANT with turbovec-ffi Rust backend via Cargo: ${CARGO_BIN}")
     add_custom_target(turbovec_ffi_rust ALL
         COMMAND ${CARGO_BIN} build --release --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi/Cargo.toml
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi
         COMMENT "Building turbovec-ffi Rust crate via Cargo"
     )
+    set(TURBOVEC_RUST_LIB "${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi/target/release/libturbovec_ffi.a")
+    add_compile_definitions(AMUQUANT_BACKEND_RUST=1)
 else()
-    message(STATUS "Cargo not detected. Utilizing native C++ SIMD Lloyd-Max engine backend.")
+    message(STATUS "Configuring AMU-QUANT with canonical native C++17 SIMD Lloyd-Max backend (zero external dependencies).")
 endif()
 
 # AMU-QUANT Core Library

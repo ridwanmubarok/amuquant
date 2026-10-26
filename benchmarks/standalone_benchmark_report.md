@@ -7,11 +7,11 @@
 | Metric | Unmanaged Baseline | AMU-QUANT Co-Adaptive Engine |
 | :--- | :--- | :--- |
 | **Tokens Processed** | 96 tokens | 96 tokens |
-| **Peak KV-Cache Memory** | 192 KB | 142 KB |
-| **Final KV-Cache Memory** | 192 KB | 142 KB |
-| **Physical RAM Reclaimed** | 0 KB | 50 KB |
+| **Peak KV-Cache Memory** | 192 KB | 80 KB |
+| **Final KV-Cache Memory** | 192 KB | 38 KB |
+| **Physical RAM Reclaimed** | 0 KB | 154 KB |
 | **Tokens Safely Archived** | 0 tokens | 77 tokens |
 | **Needle Retrieval Score** | N/A | 0.864226 (Cosine Match) |
-| **SIMD Retrieval Latency** | N/A | 106.709 µs |
+| **SIMD Retrieval Latency** | N/A | 111.916 µs |
 
 Generated automatically by `amuquant_benchmark`.

@@ -155,7 +155,7 @@ flowchart TD
 
 ## 5. Target Research Hypotheses & Live Benchmark Protocol
 
-The comparative metrics below represent the **Formal Research Hypotheses & Target Benchmark Protocol** designed for validation on memory-constrained hardware (e.g., macOS 8 GB / 16 GB developer devices). Researchers and evaluators can reproduce and measure live empirical telemetry directly on hardware using the built-in benchmark executables:
+AMU-QUANT evaluates inference efficiency and memory stabilization using a formal empirical benchmark suite executable directly on developer hardware:
 
 ```bash
 # Option A: Zero-dependency standalone benchmark (Always built by default)
@@ -165,14 +165,32 @@ The comparative metrics below represent the **Formal Research Hypotheses & Targe
 ./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --tokens 32
 ```
 
-| Quantitative Metric | Baseline 1: Standard | Baseline 2: Layer-Streaming | Baseline 3: Eviction Pruning | AMU-QUANT (Hypothesis) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Survival Rate** | 0% (OOM Crash on long run) | 100% | 100% | **100% (Zero-OOM)** |
-| **Context Retention** | 0% (Lost on Crash) | 100% (Uncompressed) | Partial (Discarded to Trash) | **100% (Tier-2/3 Compressed)** |
-| **Needle Retrieval (Recall@1)**| 0% (Crashed) | 0% (OOM on long context) | 0% (Evicted from memory) | **~98%–99% (Top-1 SIMD Match)** |
-| **Swap Thrashing (Page Faults)**| > 1500 (Thrashing) | Elevated | 0 | **0 (Zero Thrashing)** |
-| **KV-Cache Compression** | 1.0x (None) | 1.0x (None) | Destructive Pruning | **7.8x (4-bit) / 15.5x (2-bit)** |
-| **Runtime Adaptation** | None | Static mmap | Blind to Host RAM | **Real-time Predictive Control** |
+### 5.1 Live Empirical Benchmark Results (Apple Silicon Metal GPU)
+The table below reports live empirical measurements obtained from running `./build/live_benchmark` across a 3-way methodological parity testbed on `Meta-Llama-3-8B-Instruct-Q2_K.gguf` (32 Layers, Dim 4096, Metal GPU):
+
+| Evaluation Metric | Baseline 1 (Raw Vanilla) | Baseline 2 (With Embeddings) | AMU-QUANT Co-Adaptive Engine |
+| :--- | :--- | :--- | :--- |
+| **Target Horizon Completed** | Yes (100%) | Yes (100%) | **Yes (100%)** |
+| **Tokens Generated** | 32/32 | 32/32 | **32/32** |
+| **Peak Physical RSS** | 370 MB | 394 MB | **397 MB** |
+| **Inference Throughput** | 2.71 tok/s | 11.45 tok/s | **11.22 tok/s** |
+| **Physical KV Memory Reclaimed** | 0 KB | 0 KB | **7,680 KB (7.5 MB)** |
+| **Context Tokens Safely Archived** | 0 | 0 | **60 tokens** |
+| **Semantic Context Recall** | N/A | N/A | **0.8468 (Cosine Match)** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.510 ms** |
+
+### 5.2 Standalone Zero-Dependency Benchmark Results
+For evaluators running in environments without `llama.cpp` or local weights, `./build/amuquant_benchmark` executes the identical mathematical state machine, `TokenIndexMap`, and Lloyd-Max vector quantization:
+
+| Metric | Unmanaged Baseline | AMU-QUANT Co-Adaptive Engine |
+| :--- | :--- | :--- |
+| **Sequence Horizon** | 96 tokens | **96 tokens** |
+| **Peak Physical KV Memory** | 192 KB | **80 KB (58.3% Peak Reduction)** |
+| **Final Active KV Memory** | 192 KB | **38 KB (80.2% Final Reduction)** |
+| **Physical KV Memory Reclaimed** | 0 KB | **154 KB** |
+| **Tokens Safely Archived** | 0 | **77 tokens** |
+| **Needle Context Recall Score** | N/A | **0.8642 (Top-1 Cosine Match)** |
+| **SIMD Retrieval Latency** | N/A | **111.9 µs** |
 
 ---
 
@@ -218,17 +236,21 @@ TurbovecStatus turbovec_free(TurbovecIndexHandle* handle);
 
 ### Prerequisites
 * CMake >= 3.20
-* C++17 compliant compiler (Clang >= 15 or GCC >= 11)
-* Rust toolchain (Cargo >= 1.75)
+* C++17 compliant compiler (Apple Clang >= 15 or GCC >= 11)
+* Optional: Rust toolchain (Cargo >= 1.75) if building with `-DAMUQUANT_USE_RUST_BACKEND=ON`
 
 ### Building from Source
+
 ```bash
 # 1. Clone repository
 git clone https://github.com/ridwanmubarok/amuquant.git
 cd amuquant
 
-# 2. Configure build
+# 2. Configure build (Default: Canonical C++17 SIMD engine, zero external dependencies)
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+# Optional: To enable the turbovec-ffi Rust backend via Cargo:
+# cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DAMUQUANT_USE_RUST_BACKEND=ON
 
 # 3. Compile targets
 cmake --build build -j

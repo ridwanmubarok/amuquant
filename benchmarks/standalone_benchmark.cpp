@@ -23,9 +23,10 @@ struct StandaloneKVCache {
     std::vector<int32_t> slot_positions;
     size_t total_reclaimed_bytes{0};
 
-    void append_token(int32_t pos) {
+    void append_token() {
+        int32_t next_pos = slot_positions.empty() ? 0 : (slot_positions.back() + 1);
         token_slots.push_back(std::vector<uint16_t>(embedding_dim, 0x3C00));
-        slot_positions.push_back(pos);
+        slot_positions.push_back(next_pos);
     }
 
     void seq_rm(int32_t p0, int32_t p1) {
@@ -130,7 +131,7 @@ int main(int argc, char** argv) {
 
         auto t_start = std::chrono::steady_clock::now();
         for (uint32_t t = 0; t < total_tokens; ++t) {
-            kv_cache.append_token(t);
+            kv_cache.append_token();
             size_t cur_mem_kb = kv_cache.memory_bytes() / 1024;
             if (cur_mem_kb > unmanaged_res.peak_kv_memory_kb) {
                 unmanaged_res.peak_kv_memory_kb = cur_mem_kb;
@@ -192,7 +193,8 @@ int main(int argc, char** argv) {
 
         auto t_start = std::chrono::steady_clock::now();
         for (uint32_t t = 0; t < total_tokens; ++t) {
-            kv_cache.append_token(t);
+            kv_cache.append_token();
+            engine.append_token(t);
 
             // Layer madvise paging hooks
             for (uint32_t l = 0; l < NUM_LAYERS; ++l) {
@@ -219,7 +221,7 @@ int main(int argc, char** argv) {
             }
             telemetry->set_mock_stats(s);
 
-            engine.step_token(t, t + 1, valid_extractor, seq_rm, seq_add);
+            engine.step_token(t, static_cast<uint32_t>(kv_cache.active_slots()), valid_extractor, seq_rm, seq_add);
 
             size_t cur_mem_kb = kv_cache.memory_bytes() / 1024;
             if (cur_mem_kb > amuquant_res.peak_kv_memory_kb) {

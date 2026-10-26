@@ -75,6 +75,11 @@ public:
     std::shared_ptr<KVSurgeon> get_kv_surgeon() { return kv_surgeon_; }
     std::shared_ptr<AMUQuantController> get_controller() { return controller_; }
 
+    TokenIndexMap& get_token_map() { return kv_surgeon_->get_token_map(); }
+    const TokenIndexMap& get_token_map() const { return kv_surgeon_->get_token_map(); }
+    void init_token_sequence(uint32_t prompt_tokens) { if (kv_surgeon_) kv_surgeon_->get_token_map().init(prompt_tokens); }
+    void append_token(uint64_t logical_id) { if (kv_surgeon_) kv_surgeon_->get_token_map().append_token(logical_id); }
+
 private:
     AMUQuantConfig config_;
     TurbovecIndexHandle* turbovec_handle_{nullptr};

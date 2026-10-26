@@ -14,9 +14,6 @@
 #include <filesystem>
 #include <cstring>
 #include <algorithm>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -27,6 +24,7 @@ using namespace amuquant;
 struct BenchmarkRunResult {
     std::string name;
     bool completed{false};
+    bool natural_eos{false};
     uint32_t tokens_generated{0};
     double duration_sec{0.0};
     double throughput_tok_s{0.0};
@@ -53,7 +51,7 @@ static int get_optimal_pcores() {
 
 int main(int argc, char** argv) {
     std::string model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
-    uint32_t target_tokens = 64;
+    uint32_t target_tokens = 32;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -68,7 +66,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "================================================================================\n";
-    std::cout << "  AMU-QUANT LIVE EMPIRICAL BENCHMARK: DUAL-RUN COMPARATIVE EVALUATION           \n";
+    std::cout << "  AMU-QUANT LIVE EMPIRICAL BENCHMARK: 3-WAY METHODOLOGICAL EVALUATION           \n";
     std::cout << "  Target Model: " << model_path << "\n";
     std::cout << "  Decode Horizon: " << target_tokens << " tokens\n";
     std::cout << "================================================================================\n" << std::endl;
@@ -87,7 +85,7 @@ int main(int argc, char** argv) {
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 99; // Attempt full offload if supported, fallback to CPU
+    mparams.n_gpu_layers = 99; // Offload to Metal GPU if available
 
     llama_model* model = llama_model_load_from_file(model_path.c_str(), mparams);
     if (!model) {
@@ -112,11 +110,11 @@ int main(int argc, char** argv) {
     SystemTelemetry telemetry_sampler;
 
     // =========================================================================
-    // RUN 1: BASELINE INFERENCE (Standard Vanilla llama.cpp without AMU-QUANT)
+    // RUN 1: UNINSTRUMENTED BASELINE (Vanilla llama.cpp, embeddings = false)
     // =========================================================================
-    std::cout << "[RUN 1/2] Executing Baseline (Standard llama.cpp without AMU-QUANT)..." << std::endl;
-    BenchmarkRunResult baseline_res;
-    baseline_res.name = "Baseline (Standard llama.cpp)";
+    std::cout << "[RUN 1/3] Executing Baseline 1 (Standard llama.cpp, no embeddings)..." << std::endl;
+    BenchmarkRunResult raw_baseline_res;
+    raw_baseline_res.name = "Baseline 1 (Raw Vanilla)";
 
     {
         llama_context_params cparams = llama_context_default_params();
@@ -133,8 +131,8 @@ int main(int argc, char** argv) {
         llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
         MemoryStats m_init = telemetry_sampler.sample();
-        baseline_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
-        baseline_res.peak_rss_mb = baseline_res.initial_rss_mb;
+        raw_baseline_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
+        raw_baseline_res.peak_rss_mb = raw_baseline_res.initial_rss_mb;
 
         llama_batch batch = llama_batch_init(512, 0, 1);
         batch.n_tokens = 0;
@@ -155,7 +153,10 @@ int main(int argc, char** argv) {
             llama_token new_token = llama_sampler_sample(smpl, ctx, -1);
             llama_sampler_accept(smpl, new_token);
 
-            if (llama_vocab_is_eog(vocab, new_token)) break;
+            if (llama_vocab_is_eog(vocab, new_token)) {
+                raw_baseline_res.natural_eos = true;
+                break;
+            }
 
             batch.n_tokens = 1;
             batch.token[0] = new_token;
@@ -167,79 +168,38 @@ int main(int argc, char** argv) {
             if (llama_decode(ctx, batch) != 0) break;
 
             n_past++;
-            baseline_res.tokens_generated++;
+            raw_baseline_res.tokens_generated++;
 
             if (step % 8 == 0) {
                 MemoryStats s = telemetry_sampler.sample();
                 uint64_t rss_mb = s.process_rss_bytes / (1024 * 1024);
-                if (rss_mb > baseline_res.peak_rss_mb) baseline_res.peak_rss_mb = rss_mb;
+                if (rss_mb > raw_baseline_res.peak_rss_mb) raw_baseline_res.peak_rss_mb = rss_mb;
             }
         }
         auto t_end = std::chrono::steady_clock::now();
 
-        baseline_res.duration_sec = std::chrono::duration<double>(t_end - t_start).count();
-        baseline_res.throughput_tok_s = (baseline_res.tokens_generated > 0 && baseline_res.duration_sec > 0) ?
-                                        (baseline_res.tokens_generated / baseline_res.duration_sec) : 0.0;
-        baseline_res.final_rss_mb = telemetry_sampler.sample().process_rss_bytes / (1024 * 1024);
-        baseline_res.completed = (baseline_res.tokens_generated > 0);
+        raw_baseline_res.duration_sec = std::chrono::duration<double>(t_end - t_start).count();
+        raw_baseline_res.throughput_tok_s = (raw_baseline_res.tokens_generated > 0 && raw_baseline_res.duration_sec > 0) ?
+                                            (raw_baseline_res.tokens_generated / raw_baseline_res.duration_sec) : 0.0;
+        raw_baseline_res.final_rss_mb = telemetry_sampler.sample().process_rss_bytes / (1024 * 1024);
+        raw_baseline_res.completed = (raw_baseline_res.tokens_generated == target_tokens || raw_baseline_res.natural_eos);
 
         llama_batch_free(batch);
         llama_sampler_free(smpl);
         llama_free(ctx);
     }
-    std::cout << "  - Baseline Completed: " << baseline_res.tokens_generated << " tokens generated | "
-              << "Peak RSS: " << baseline_res.peak_rss_mb << " MB | "
-              << "Throughput: " << std::fixed << std::setprecision(1) << baseline_res.throughput_tok_s << " tok/s\n\n";
+    std::cout << "  - Baseline 1 Completed: " << raw_baseline_res.tokens_generated << "/" << target_tokens << " tokens | "
+              << "Peak RSS: " << raw_baseline_res.peak_rss_mb << " MB | "
+              << "Throughput: " << std::fixed << std::setprecision(1) << raw_baseline_res.throughput_tok_s << " tok/s\n\n";
 
     // =========================================================================
-    // RUN 2: AMU-QUANT CO-ADAPTIVE INFERENCE (Active Controller + KV Surgeon)
+    // RUN 2: PARITY BASELINE (Standard llama.cpp with embeddings enabled)
     // =========================================================================
-    std::cout << "[RUN 2/2] Executing AMU-QUANT Co-Adaptive Engine..." << std::endl;
-    BenchmarkRunResult amuquant_res;
-    amuquant_res.name = "AMU-QUANT Co-Adaptive Engine";
+    std::cout << "[RUN 2/3] Executing Baseline 2 (Parity with embeddings enabled)..." << std::endl;
+    BenchmarkRunResult parity_baseline_res;
+    parity_baseline_res.name = "Baseline 2 (With Embeddings)";
 
     {
-        // 1. Configure AMUQuantEngine
-        AMUQuantConfig cfg;
-        cfg.memory_limit_bytes = 4800ULL * 1024ULL * 1024ULL; // Target working budget
-        cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // OS headroom
-        cfg.num_layers = block_count;
-        cfg.embedding_dim = embedding_length;
-        cfg.eval_interval_tokens = 4;
-        cfg.recent_window_tokens = 32; // Excises context beyond 32 tokens
-        cfg.min_recent_window_tokens = 16;
-        cfg.attention_sink_tokens = 4;
-
-        AMUQuantEngine engine(cfg);
-        Status st = engine.initialize();
-        assert(st == Status::OK);
-
-        // 2. Map GGUF model file and register layers
-        int model_fd = open(model_path.c_str(), O_RDONLY);
-        void* mmap_base = MAP_FAILED;
-        size_t mmap_len = 0;
-        if (model_fd >= 0) {
-            try {
-                mmap_len = std::filesystem::file_size(model_path);
-                mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_SHARED, model_fd, 0);
-            } catch (...) {}
-        }
-        if (mmap_base != MAP_FAILED && mmap_len > 0) {
-            size_t bytes_per_layer = mmap_len / block_count;
-            for (uint32_t l = 0; l < block_count; ++l) {
-                void* layer_addr = static_cast<char*>(mmap_base) + (l * bytes_per_layer);
-                engine.register_layer(l, layer_addr, bytes_per_layer);
-            }
-        }
-
-        auto trigger_layer_paging = [&](uint32_t num_layers) {
-            for (uint32_t l = 0; l < num_layers; ++l) {
-                engine.begin_layer_forward(l);
-                engine.end_layer_forward(l);
-            }
-        };
-
-        // 3. Initialize libllama context with embeddings enabled
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = 2048;
         cparams.n_batch = 512;
@@ -253,12 +213,110 @@ int main(int argc, char** argv) {
         llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
         llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
+        MemoryStats m_init = telemetry_sampler.sample();
+        parity_baseline_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
+        parity_baseline_res.peak_rss_mb = parity_baseline_res.initial_rss_mb;
+
+        llama_batch batch = llama_batch_init(512, 0, 1);
+        batch.n_tokens = 0;
+        for (int i = 0; i < n_prompt; ++i) {
+            batch.token[batch.n_tokens] = prompt_tokens[i];
+            batch.pos[batch.n_tokens] = i;
+            batch.n_seq_id[batch.n_tokens] = 1;
+            batch.seq_id[batch.n_tokens][0] = 0;
+            batch.logits[batch.n_tokens] = true;
+            batch.n_tokens++;
+        }
+
+        llama_decode(ctx, batch);
+        int32_t n_past = n_prompt;
+
+        auto t_start = std::chrono::steady_clock::now();
+        for (uint32_t step = 0; step < target_tokens; ++step) {
+            llama_token new_token = llama_sampler_sample(smpl, ctx, -1);
+            llama_sampler_accept(smpl, new_token);
+
+            if (llama_vocab_is_eog(vocab, new_token)) {
+                parity_baseline_res.natural_eos = true;
+                break;
+            }
+
+            batch.n_tokens = 1;
+            batch.token[0] = new_token;
+            batch.pos[0] = n_past;
+            batch.n_seq_id[0] = 1;
+            batch.seq_id[0][0] = 0;
+            batch.logits[0] = true;
+
+            if (llama_decode(ctx, batch) != 0) break;
+
+            n_past++;
+            parity_baseline_res.tokens_generated++;
+
+            if (step % 8 == 0) {
+                MemoryStats s = telemetry_sampler.sample();
+                uint64_t rss_mb = s.process_rss_bytes / (1024 * 1024);
+                if (rss_mb > parity_baseline_res.peak_rss_mb) parity_baseline_res.peak_rss_mb = rss_mb;
+            }
+        }
+        auto t_end = std::chrono::steady_clock::now();
+
+        parity_baseline_res.duration_sec = std::chrono::duration<double>(t_end - t_start).count();
+        parity_baseline_res.throughput_tok_s = (parity_baseline_res.tokens_generated > 0 && parity_baseline_res.duration_sec > 0) ?
+                                               (parity_baseline_res.tokens_generated / parity_baseline_res.duration_sec) : 0.0;
+        parity_baseline_res.final_rss_mb = telemetry_sampler.sample().process_rss_bytes / (1024 * 1024);
+        parity_baseline_res.completed = (parity_baseline_res.tokens_generated == target_tokens || parity_baseline_res.natural_eos);
+
+        llama_batch_free(batch);
+        llama_sampler_free(smpl);
+        llama_free(ctx);
+    }
+    std::cout << "  - Baseline 2 Completed: " << parity_baseline_res.tokens_generated << "/" << target_tokens << " tokens | "
+              << "Peak RSS: " << parity_baseline_res.peak_rss_mb << " MB | "
+              << "Throughput: " << std::fixed << std::setprecision(1) << parity_baseline_res.throughput_tok_s << " tok/s\n\n";
+
+    // =========================================================================
+    // RUN 3: AMU-QUANT CO-ADAPTIVE RUNTIME ENGINE
+    // =========================================================================
+    std::cout << "[RUN 3/3] Executing AMU-QUANT Co-Adaptive Runtime Engine..." << std::endl;
+    BenchmarkRunResult amuquant_res;
+    amuquant_res.name = "AMU-QUANT Co-Adaptive Engine";
+
+    {
+        AMUQuantConfig cfg;
+        cfg.memory_limit_bytes = 4800ULL * 1024ULL * 1024ULL; // Target working budget
+        cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // OS stability headroom
+        cfg.num_layers = block_count;
+        cfg.embedding_dim = embedding_length;
+        cfg.eval_interval_tokens = 4;
+        cfg.recent_window_tokens = 24; // Surgical window for prompt eviction
+        cfg.min_recent_window_tokens = 12;
+        cfg.attention_sink_tokens = 4;
+
+        AMUQuantEngine engine(cfg);
+        Status st = engine.initialize();
+        assert(st == Status::OK);
+
+        llama_context_params cparams = llama_context_default_params();
+        cparams.n_ctx = 2048;
+        cparams.n_batch = 512;
+        cparams.n_threads = pcore_threads;
+        cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        cparams.embeddings = true;
+
+        llama_context* ctx = llama_init_from_model(model, cparams);
+        llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
+        llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
+
+        // Persistent context representations indexed by immutable logical token IDs
         std::vector<std::vector<float>> session_embeddings;
         llama_memory_t mem = llama_get_memory(ctx);
 
-        auto extractor = [&](int32_t pos) -> const float* {
-            if (pos >= 0 && pos < static_cast<int32_t>(session_embeddings.size())) {
-                return session_embeddings[pos].data();
+        auto extractor = [&](int32_t logical_id) -> const float* {
+            if (logical_id >= 0 && logical_id < static_cast<int32_t>(session_embeddings.size())) {
+                return session_embeddings[logical_id].data();
             }
             return nullptr;
         };
@@ -278,6 +336,9 @@ int main(int argc, char** argv) {
         amuquant_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
         amuquant_res.peak_rss_mb = amuquant_res.initial_rss_mb;
 
+        // Initialize TokenIndexMap with prompt sequence
+        engine.init_token_sequence(n_prompt);
+
         llama_batch batch = llama_batch_init(512, 0, 1);
         batch.n_tokens = 0;
         for (int i = 0; i < n_prompt; ++i) {
@@ -285,21 +346,20 @@ int main(int argc, char** argv) {
             batch.pos[batch.n_tokens] = i;
             batch.n_seq_id[batch.n_tokens] = 1;
             batch.seq_id[batch.n_tokens][0] = 0;
-            batch.logits[batch.n_tokens] = (i == n_prompt - 1);
+            batch.logits[batch.n_tokens] = true;
             batch.n_tokens++;
         }
 
         llama_decode(ctx, batch);
-        trigger_layer_paging(block_count);
 
+        // Extract genuine hidden-state embeddings for all prompt tokens
         for (int i = 0; i < n_prompt; ++i) {
             const float* embd = llama_get_embeddings_ith(ctx, i);
             if (embd != nullptr) {
                 session_embeddings.push_back(std::vector<float>(embd, embd + embedding_length));
             } else {
-                std::vector<float> vec(embedding_length, 0.0f);
-                vec[prompt_tokens[i] % embedding_length] = 1.0f;
-                session_embeddings.push_back(std::move(vec));
+                std::cerr << "[ERROR] Could not extract prompt embedding at index " << i << std::endl;
+                session_embeddings.push_back(std::vector<float>(embedding_length, 0.0f));
             }
         }
 
@@ -310,10 +370,19 @@ int main(int argc, char** argv) {
             llama_token new_token = llama_sampler_sample(smpl, ctx, -1);
             llama_sampler_accept(smpl, new_token);
 
-            if (llama_vocab_is_eog(vocab, new_token)) break;
+            if (llama_vocab_is_eog(vocab, new_token)) {
+                amuquant_res.natural_eos = true;
+                break;
+            }
 
-            // AMU-QUANT controller arbitration step
-            engine.step_token(n_past, n_past + 1, extractor, seq_rm, seq_add);
+            // Register newly decoded logical token into TokenIndexMap
+            engine.append_token(n_prompt + step);
+
+            // Active physical sequence length in KV-cache
+            int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
+
+            // AMU-QUANT controller arbitration and transactional KV surgery
+            engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
 
             llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
             batch.n_tokens = 1;
@@ -324,15 +393,12 @@ int main(int argc, char** argv) {
             batch.logits[0] = true;
 
             if (llama_decode(ctx, batch) != 0) break;
-            trigger_layer_paging(block_count);
 
-            const float* embd = llama_get_embeddings_ith(ctx, -1);
+            const float* embd = llama_get_embeddings_ith(ctx, 0);
             if (embd != nullptr) {
                 session_embeddings.push_back(std::vector<float>(embd, embd + embedding_length));
             } else {
-                std::vector<float> vec(embedding_length, 0.0f);
-                vec[new_token % embedding_length] = 1.0f;
-                session_embeddings.push_back(std::move(vec));
+                session_embeddings.push_back(std::vector<float>(embedding_length, 0.0f));
             }
 
             n_past++;
@@ -353,28 +419,26 @@ int main(int argc, char** argv) {
         amuquant_res.final_regime = engine.get_controller()->get_current_regime();
         uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
         amuquant_res.kv_tokens_archived = engine.get_kv_surgeon()->get_stats(block_count, n_kv_heads, 128).archived_chunks;
-        amuquant_res.completed = (amuquant_res.tokens_generated > 0);
+        amuquant_res.completed = (amuquant_res.tokens_generated == target_tokens || amuquant_res.natural_eos);
 
-        // 4. Test Semantic Retrieval of Excised Context Token
-        if (!session_embeddings.empty()) {
+        // Test Semantic Retrieval on an archived middle prompt token (e.g. index 8)
+        constexpr uint32_t TEST_ARCHIVE_POS = 8;
+        if (TEST_ARCHIVE_POS < session_embeddings.size()) {
             auto t_rec_start = std::chrono::high_resolution_clock::now();
-            auto recall_results = engine.recall_context(session_embeddings[5].data(), 3);
+            auto recall_results = engine.recall_context(session_embeddings[TEST_ARCHIVE_POS].data(), 3);
             auto t_rec_end = std::chrono::high_resolution_clock::now();
             amuquant_res.recall_latency_ms = std::chrono::duration<double, std::milli>(t_rec_end - t_rec_start).count();
-            if (!recall_results.empty()) {
+            if (!recall_results.empty() && recall_results[0].id == TEST_ARCHIVE_POS) {
                 amuquant_res.recall_score = recall_results[0].score;
             }
         }
 
-        // Clean up
-        if (mmap_base != MAP_FAILED && mmap_len > 0) munmap(mmap_base, mmap_len);
-        if (model_fd >= 0) close(model_fd);
         llama_batch_free(batch);
         llama_sampler_free(smpl);
         llama_free(ctx);
     }
 
-    std::cout << "  - AMU-QUANT Completed: " << amuquant_res.tokens_generated << " tokens generated | "
+    std::cout << "  - AMU-QUANT Completed: " << amuquant_res.tokens_generated << "/" << target_tokens << " tokens | "
               << "Peak RSS: " << amuquant_res.peak_rss_mb << " MB | "
               << "Tokens Archived: " << amuquant_res.kv_tokens_archived << " | "
               << "Throughput: " << std::fixed << std::setprecision(1) << amuquant_res.throughput_tok_s << " tok/s\n\n";
@@ -383,58 +447,82 @@ int main(int argc, char** argv) {
     llama_backend_free();
 
     // =========================================================================
-    // COMPARATIVE SUMMARY REPORT
+    // 3-WAY COMPARATIVE SUMMARY REPORT
     // =========================================================================
     std::cout << "================================================================================\n";
-    std::cout << "  EMPIRICAL BENCHMARK SUMMARY (MACOS 8/16 GB HOST TESTBED)                      \n";
+    std::cout << "  EMPIRICAL BENCHMARK SUMMARY (3-WAY METHODOLOGICAL PARITY TESTBED)             \n";
     std::cout << "================================================================================\n";
     std::cout << std::left << std::setw(32) << "Evaluation Metric"
-              << std::setw(24) << "Baseline (Vanilla)"
-              << std::setw(24) << "AMU-QUANT (Engine)" << "\n";
+              << std::setw(20) << "Baseline 1 (Raw)"
+              << std::setw(20) << "Baseline 2 (Parity)"
+              << std::setw(20) << "AMU-QUANT" << "\n";
     std::cout << "--------------------------------------------------------------------------------\n";
-    std::cout << std::left << std::setw(32) << "Survival & Completion Rate"
-              << std::setw(24) << (baseline_res.completed ? "100% Completed" : "Failed / OOM")
-              << std::setw(24) << (amuquant_res.completed ? "100% Completed" : "Failed / OOM") << "\n";
+    std::cout << std::left << std::setw(32) << "Target Horizon Completed"
+              << std::setw(20) << (raw_baseline_res.completed ? "Yes (100%)" : "Incomplete")
+              << std::setw(20) << (parity_baseline_res.completed ? "Yes (100%)" : "Incomplete")
+              << std::setw(20) << (amuquant_res.completed ? "Yes (100%)" : "Incomplete") << "\n";
     std::cout << std::left << std::setw(32) << "Tokens Generated"
-              << std::setw(24) << baseline_res.tokens_generated
-              << std::setw(24) << amuquant_res.tokens_generated << "\n";
-    std::cout << std::left << std::setw(32) << "Throughput (tokens/sec)"
-              << std::setw(24) << baseline_res.throughput_tok_s
-              << std::setw(24) << amuquant_res.throughput_tok_s << "\n";
-    std::cout << std::left << std::setw(32) << "Peak Process RSS"
-              << std::setw(24) << (std::to_string(baseline_res.peak_rss_mb) + " MB")
-              << std::setw(24) << (std::to_string(amuquant_res.peak_rss_mb) + " MB") << "\n";
-    std::cout << std::left << std::setw(32) << "Tokens Archived to Vector Index"
-              << std::setw(24) << "0 (None)"
-              << std::setw(24) << amuquant_res.kv_tokens_archived << "\n";
-    std::cout << std::left << std::setw(32) << "Context Semantic Recall Score"
-              << std::setw(24) << "N/A (Uncompressed)"
-              << std::setw(24) << (amuquant_res.recall_score > 0.0 ? std::to_string(amuquant_res.recall_score) : "N/A") << "\n";
+              << std::setw(20) << (std::to_string(raw_baseline_res.tokens_generated) + "/" + std::to_string(target_tokens))
+              << std::setw(20) << (std::to_string(parity_baseline_res.tokens_generated) + "/" + std::to_string(target_tokens))
+              << std::setw(20) << (std::to_string(amuquant_res.tokens_generated) + "/" + std::to_string(target_tokens)) << "\n";
+    std::cout << std::left << std::setw(32) << "Peak Physical RSS (MB)"
+              << std::setw(20) << raw_baseline_res.peak_rss_mb
+              << std::setw(20) << parity_baseline_res.peak_rss_mb
+              << std::setw(20) << amuquant_res.peak_rss_mb << "\n";
+    std::cout << std::left << std::setw(32) << "Inference Throughput (tok/s)"
+              << std::setw(20) << std::fixed << std::setprecision(2) << raw_baseline_res.throughput_tok_s
+              << std::setw(20) << std::fixed << std::setprecision(2) << parity_baseline_res.throughput_tok_s
+              << std::setw(20) << std::fixed << std::setprecision(2) << amuquant_res.throughput_tok_s << "\n";
+    std::cout << std::left << std::setw(32) << "KV Memory Reclaimed (KB)"
+              << std::setw(20) << "0 KB"
+              << std::setw(20) << "0 KB"
+              << std::setw(20) << std::to_string(amuquant_res.kv_memory_reclaimed_kb) + " KB" << "\n";
+    std::cout << std::left << std::setw(32) << "Context Tokens Archived"
+              << std::setw(20) << "0"
+              << std::setw(20) << "0"
+              << std::setw(20) << amuquant_res.kv_tokens_archived << "\n";
+    std::cout << std::left << std::setw(32) << "Semantic Context Recall"
+              << std::setw(20) << "N/A"
+              << std::setw(20) << "N/A"
+              << std::setw(20) << std::fixed << std::setprecision(4) << amuquant_res.recall_score << "\n";
     std::cout << std::left << std::setw(32) << "SIMD Retrieval Latency"
-              << std::setw(24) << "N/A"
-              << std::setw(24) << (std::to_string(amuquant_res.recall_latency_ms) + " ms") << "\n";
-    std::cout << "================================================================================\n" << std::endl;
+              << std::setw(20) << "N/A"
+              << std::setw(20) << "N/A"
+              << std::setw(20) << (std::to_string(amuquant_res.recall_latency_ms) + " ms") << "\n";
+    std::cout << "================================================================================\n";
 
-    // Export report to markdown
+    // Export Markdown Report
     std::ofstream rpt("benchmarks/live_benchmark_report.md");
     if (rpt.is_open()) {
-        rpt << "# AMU-QUANT Live Empirical Benchmark Report\n\n";
-        rpt << "- **Date**: " << __DATE__ << " " << __TIME__ << "\n";
+        rpt << "# AMU-QUANT Live Empirical Benchmark Report (3-Way Methodological Parity)\n\n";
         rpt << "- **Model**: `" << model_path << "`\n";
-        rpt << "- **Platform**: macOS (Apple Silicon / Darwin VM)\n";
-        rpt << "- **Threads**: " << pcore_threads << " CPU P-Cores\n\n";
-        rpt << "| Metric | Baseline (Vanilla llama.cpp) | AMU-QUANT Co-Adaptive Engine |\n";
-        rpt << "| :--- | :--- | :--- |\n";
-        rpt << "| **Completion Status** | " << (baseline_res.completed ? "100% Completed" : "OOM Crash") << " | " << (amuquant_res.completed ? "100% Completed (Zero-OOM)" : "Failed") << " |\n";
-        rpt << "| **Generated Tokens** | " << baseline_res.tokens_generated << " tokens | " << amuquant_res.tokens_generated << " tokens |\n";
-        rpt << "| **Throughput** | " << std::fixed << std::setprecision(1) << baseline_res.throughput_tok_s << " tok/s | " << amuquant_res.throughput_tok_s << " tok/s |\n";
-        rpt << "| **Peak Resident RAM (RSS)** | " << baseline_res.peak_rss_mb << " MB | " << amuquant_res.peak_rss_mb << " MB |\n";
-        rpt << "| **Tokens Safely Archived** | 0 (Unmanaged) | " << amuquant_res.kv_tokens_archived << " tokens |\n";
-        rpt << "| **Context Retrieval Score** | N/A | " << amuquant_res.recall_score << " (Cosine Match) |\n";
-        rpt << "| **SIMD Retrieval Latency** | N/A | " << amuquant_res.recall_latency_ms << " ms |\n\n";
-        rpt << "Generated automatically by `live_benchmark` executable.\n";
+        rpt << "- **Architecture**: " << block_count << " Layers, Dim " << embedding_length << "\n";
+        rpt << "- **Target Generation Horizon**: " << target_tokens << " tokens\n\n";
+        rpt << "| Evaluation Metric | Baseline 1 (Raw Vanilla) | Baseline 2 (With Embeddings) | AMU-QUANT Co-Adaptive Engine |\n";
+        rpt << "| :--- | :--- | :--- | :--- |\n";
+        rpt << "| **Target Horizon Completed** | " << (raw_baseline_res.completed ? "Yes (100%)" : "Incomplete")
+            << " | " << (parity_baseline_res.completed ? "Yes (100%)" : "Incomplete")
+            << " | " << (amuquant_res.completed ? "Yes (100%)" : "Incomplete") << " |\n";
+        rpt << "| **Tokens Generated** | " << raw_baseline_res.tokens_generated << "/" << target_tokens
+            << " | " << parity_baseline_res.tokens_generated << "/" << target_tokens
+            << " | " << amuquant_res.tokens_generated << "/" << target_tokens << " |\n";
+        rpt << "| **Peak Physical RSS** | " << raw_baseline_res.peak_rss_mb << " MB | "
+            << parity_baseline_res.peak_rss_mb << " MB | "
+            << amuquant_res.peak_rss_mb << " MB |\n";
+        rpt << "| **Inference Throughput** | " << std::fixed << std::setprecision(2) << raw_baseline_res.throughput_tok_s << " tok/s | "
+            << parity_baseline_res.throughput_tok_s << " tok/s | "
+            << amuquant_res.throughput_tok_s << " tok/s |\n";
+        rpt << "| **KV Memory Reclaimed** | 0 KB | 0 KB | "
+            << amuquant_res.kv_memory_reclaimed_kb << " KB |\n";
+        rpt << "| **Tokens Safely Archived** | 0 | 0 | "
+            << amuquant_res.kv_tokens_archived << " |\n";
+        rpt << "| **Semantic Recall Score** | N/A | N/A | "
+            << std::fixed << std::setprecision(4) << amuquant_res.recall_score << " |\n";
+        rpt << "| **SIMD Retrieval Latency** | N/A | N/A | "
+            << std::fixed << std::setprecision(3) << amuquant_res.recall_latency_ms << " ms |\n\n";
+        rpt << "Generated automatically by `live_benchmark` on Apple Silicon / Metal.\n";
         rpt.close();
-        std::cout << "[INFO] Benchmark report successfully exported to benchmarks/live_benchmark_report.md\n";
+        std::cout << "\n[INFO] Live benchmark report exported to benchmarks/live_benchmark_report.md" << std::endl;
     }
 
     return 0;

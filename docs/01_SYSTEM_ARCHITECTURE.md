@@ -1,93 +1,100 @@
 # AMU-QUANT System Architecture
 
-This document presents the in-depth technical architecture of **AMU-QUANT**, a co-adaptive runtime engine bridging active layer-wise weight streaming on `llama.cpp` with in-memory vector compression via `turbovec`.
+This document presents the in-depth technical architecture of **AMU-QUANT**, a host-aware co-adaptive runtime engine for LLM inference on memory-constrained devices, integrating runtime memory pressure arbitration, transactional KV-cache surgery, and episodic vector memory compression.
 
 ---
 
 ## 1. High-Level Architecture Overview
 
-AMU-QUANT consists of four integrated subsystems executing entirely in-process in native C++17 and Rust without external Python runtime overhead:
+AMU-QUANT consists of four integrated subsystems executing entirely in-process in native C++17 with optional Rust FFI bindings:
 
 ```mermaid
 flowchart TB
-    subgraph Host_OS ["Operating System Kernel & Virtual Memory Layer"]
-        ProcMem["/proc/meminfo / mach_vm_info (RAM & Swap Telemetry)"]
-        KernelMadvise["Kernel Directives: posix_madvise / VirtualUnlock API"]
-        GGUF_File[".gguf Weight File on NVMe SSD (Single File)"]
+    subgraph Host_OS ["Operating System Kernel & Host Headroom"]
+        ProcMem["mach_vm_info / sysctl / procfs (Process RSS, Free RAM, Swap)"]
+        KernelMadvise["Page Directives: posix_madvise (DONTNEED / WILLNEED)"]
     end
 
-    subgraph AMU-QUANT_Core ["AMU-QUANT Core Engine (C++17)"]
-        subgraph Mem_Controller ["Subsystem 1: Dual-Budget Adaptive Controller"]
-            OS_Sampler["OS Memory Telemetry Sampler (K-token stride)"]
-            PredictiveEngine["Predictive Memory Pressure Estimator (Φ_t)"]
-            RegimeStateMachine["Adaptive Finite State Machine (Hysteresis)"]
+    subgraph AMU-QUANT_Core ["AMU-QUANT Core Runtime Engine (C++17)"]
+        subgraph Mem_Controller ["Subsystem 1: Host-Aware Adaptive Controller (Primary Novelty)"]
+            OS_Sampler["Host Telemetry Sampler (K-token stride)"]
+            PredictiveEngine["Dual-Budget Memory Pressure Estimator (Φ_t)"]
+            RegimeStateMachine["Tri-Modal Hysteresis State Machine"]
         end
 
-        subgraph Layer_Manager ["Subsystem 2: Active Layer-wise mmap Manager"]
-            LayerRegistry["Layer Address Space Registry (llama_model)"]
-            EvictionQueue["Page Eviction Queue (POSIX_MADV_DONTNEED)"]
-            PrefetchPipeline["Asynchronous Prefetcher (POSIX_MADV_WILLNEED)"]
+        subgraph KV_Manager ["Subsystem 2: Transactional KV-Cache Surgery Engine"]
+            TokenMap["TokenIndexMap: Physical-to-Logical ID Translation"]
+            KVSurgeon["2-Phase Commit Eviction: seq_rm & seq_add"]
+            ContextBuffer["Physical KV Working Set (llama_context)"]
         end
 
-        subgraph KV_Manager ["Subsystem 3: Dynamic KV-Cache Surgery Engine"]
-            AttentionTracker["Attention Sink & Recency Window Tracker"]
-            KVSurgeon["KV Surgery Controller: seq_rm & seq_add"]
-            ContextBuffer["Active KV Working Set (llama_context)"]
+        subgraph Layer_Manager ["Subsystem 3: Virtual Memory Page Manager (Future Extension)"]
+            LayerRegistry["Layer Address Space Registry"]
+            PagePaging["posix_madvise Virtual Memory Paging"]
         end
     end
 
-    subgraph Turbovec_Engine ["Subsystem 4: turbovec Episodic Memory (Rust FFI)"]
-        C_ABI_Bridge["turbovec-ffi Bridge (Zero-Copy Raw Pointer Interface)"]
-        TurboIndex["TurboQuant Index (Lloyd-Max 4-bit / 2-bit Compressed)"]
-        SIMD_Search["AVX2 / AVX-512 / ARM NEON Search Engine"]
-        ContextRestorer["Selective Context Unpacker & Restorer"]
+    subgraph Vector_Memory ["Subsystem 4: Episodic Vector Memory (Canonical C++ / Optional Rust FFI)"]
+        C_ABI_Bridge["turbovec-ffi C-ABI Interface"]
+        TurboIndex["Episodic Vector Memory (Lloyd-Max 4-bit / 2-bit Compressed)"]
+        SIMD_Search["AVX2 / ARM NEON SIMD Dot-Product Search Engine"]
+        ContextRestorer["Selective Context Semantic Retriever"]
     end
 
     %% Telemetry & Control Flows
-    ProcMem -->|RSS, Free RAM, Swap Rate| OS_Sampler
+    ProcMem -->|Process RSS, Host Available RAM, Swap| OS_Sampler
     OS_Sampler --> PredictiveEngine
     PredictiveEngine --> RegimeStateMachine
-    RegimeStateMachine -->|Set Sliding Window & Prefetch Depth| Layer_Manager
-    RegimeStateMachine -->|Trigger Pruning & Compression Mode| KV_Manager
+    RegimeStateMachine -->|Regime 1: Normal, Regime 2: Offload, Regime 3: Survival| KV_Manager
 
-    %% Layer Manager & OS Kernel
-    GGUF_File -->|mmap read-only| LayerRegistry
-    Layer_Manager -->|Issue Evict / Prefetch Directives| KernelMadvise
-    KernelMadvise -.->|Release Page Cache / Fault Pages In| GGUF_File
-
-    %% KV Surgery & turbovec FFI
-    KVSurgeon -->|Pruned Token Embeddings (Raw Pointer Passing)| C_ABI_Bridge
+    %% Transactional KV Surgery Flow
+    ContextBuffer -->|Physical Tokens [p_start, p_end)| KVSurgeon
+    KVSurgeon -->|Phase 1: Query Logical IDs| TokenMap
+    KVSurgeon -->|Phase 1: Insert Hidden States h_t| C_ABI_Bridge
     C_ABI_Bridge --> TurboIndex
-    TurboIndex -->|Requantize 4-bit -> 2-bit on Critical Pressure| TurboIndex
+    TurboIndex -->|Verify TURBOVEC_STATUS_OK| KVSurgeon
+    KVSurgeon -->|Phase 2: seq_rm & seq_add| ContextBuffer
+    KVSurgeon -->|Phase 2: Update Translation Mapping| TokenMap
 
     %% Context Recall
-    SIMD_Search -->|Top-K Matching Chunk IDs & Cosine Scores| ContextRestorer
-    ContextRestorer -->|Selective Context Injection| ContextBuffer
-    ContextBuffer --> KVSurgeon
+    SIMD_Search -->|Top-K Matching Logical IDs & Cosine Scores| ContextRestorer
+    ContextRestorer -->|Semantic Context Verification| ContextBuffer
 ```
 
 ---
 
 ## 2. Core Subsystems Specification
 
-### 2.1 Subsystem 1: Dual-Budget Adaptive Controller
-The controller operates as the central arbiter, evaluated synchronously every $K$ generated tokens ($K \in [4, 16]$) or asynchronously on a dedicated sampling thread.
+### 2.1 Subsystem 1: Dual-Budget Host-Aware Adaptive Controller (Primary Academic Novelty)
+The controller operates as the primary decision-maker, evaluated synchronously every $K$ generated tokens ($K \in [4, 16]$) during autoregressive decoding.
 
 * **Key Responsibilities:**
-  1. Gathers instantaneous OS memory telemetry: Available RAM, process physical footprint (RSS), and swap activity.
-  2. Evaluates the Predictive Pressure Score $\Phi_t$, which accounts for both instantaneous saturation and differential expansion rate $\frac{\Delta M}{\Delta t}$.
-  3. Transitions between three operational modes: **Regime 1 (High-Throughput)**, **Regime 2 (Balanced Offload)**, or **Regime 3 (Ultra-Low Survival)**.
-  4. Enforces a hysteresis guard band ($\delta_{\text{hyst}}$) to prevent flapping (rapid oscillation between page eviction and prefetching).
+  1. Gathers dual-budget host telemetry: Process Resident Set Size ($\mathcal{U}_{\text{process}}$), host available RAM ($\mathcal{U}_{\text{system}}$), and kernel swap thrashing ($\mathcal{P}_{\text{swap}}$).
+  2. Evaluates the Host-Aware Pressure Metric:
+     $$\Phi_t = \max(\mathcal{U}_{\text{process}}, \mathcal{U}_{\text{system}}) + \beta \cdot \mathcal{P}_{\text{growth}} + \gamma \cdot \mathcal{P}_{\text{swap}}$$
+  3. Transitions between three operational regimes: **Regime 1 (High-Throughput)**, **Regime 2 (Balanced Offload)**, and **Regime 3 (Ultra-Low Survival)**.
+  4. Enforces a hysteresis guard band ($\delta_{\text{hyst}}$) to prevent flapping between operational modes.
 
-### 2.2 Subsystem 2: Active Layer-wise mmap Manager
-Unlike naive disk-splitting architectures that fragment weight files into dozens of separate partitions on disk, AMU-QUANT operates directly on a single, unmodified `.gguf` file mapped into virtual memory address space via `mmap()`.
+### 2.2 Subsystem 2: Transactional KV-Cache Surgery & TokenIndexMap
+Unlike traditional methods that drop tokens irrevocably into trash (e.g., StreamingLLM, H2O), AMU-QUANT performs safe transactional eviction:
 
-* **Operational Mechanics:**
-  * **Layer Registration:** During initialization, AMU-QUANT parses the model layout to map the starting and ending memory offsets (`addr_start`, `byte_len`) of every transformer layer ($l = 0, 1, \dots, L-1$).
-  * **Proactive Eviction:** Immediately upon completion of the forward pass for layer $l$, the manager issues:
-    ```c
-    posix_madvise(layer[l].addr_start, layer[l].byte_len, POSIX_MADV_DONTNEED);
-    ```
+* **TokenIndexMap**:
+  - Translates shifting physical KV-cache slots (`0 .. N-1`) to immutable logical token sequence IDs (`0 .. M-1`).
+  - Ensures that when middle tokens are excised and trailing tokens are shifted down via `llama_memory_seq_add(..., delta)`, the representation extractor and vector memory always reference immutable logical tokens without index divergence.
+* **Two-Phase Transactional Commit**:
+  - **Phase 1 (Validation & Staging)**: Resolves logical IDs for all tokens in candidate slice $[p_{\text{start}}, p_{\text{end}})$. Extracts hidden-state representations $\mathbf{h}_t \in \mathbb{R}^d$ and verifies non-null pointers. Inserts vectors into `turbovec` and validates `TURBOVEC_STATUS_OK`. If ANY insertion fails or representation is missing, eviction aborts immediately with zero modifications to the physical KV cache.
+  - **Phase 2 (Physical Pruning & Realignment)**: Invokes `seq_rm` and `seq_add` to excise physical slots and close the sequence gap. Prunes `TokenIndexMap` to reflect the new contiguous physical layout.
+
+### 2.3 Subsystem 3: Episodic Vector Memory (Canonical C++ / Optional Rust FFI)
+Episodic memory archives high-dimensional hidden states ($\mathbf{h}_t \in \mathbb{R}^d$) into compressed vector memory:
+- **Canonical Default**: Pure C++17 SIMD implementation utilizing AVX2 / ARM NEON intrinsics with zero external dependencies.
+- **Optional Rust Backend**: `turbovec-ffi` static library compiled via Cargo when `-DAMUQUANT_USE_RUST_BACKEND=ON`.
+- **Lloyd-Max Quantization**: Optimal centroid lookup tables ($4\text{-bit} \to 2\text{-bit}$) minimizing mean squared quantization distortion ($\mathbb{E}[|c_i - q_j|^2]$).
+
+### 2.4 Subsystem 4: Virtual Memory Page Manager (Future Work)
+`LayerManager` encapsulates OS virtual memory primitives via `posix_madvise(DONTNEED / WILLNEED)`:
+- Validated as an isolated page management primitive via unit test suites (`test_amuquant_pipeline`).
+- Direct integration into `llama.cpp`'s internal GGML compute graph forward execution is scoped as documented future research.
     This notifies the Darwin/Linux virtual memory manager that the underlying physical pages can be immediately reclaimed from the OS page cache without writeback penalties.
   * **Asynchronous Prefetching:** When memory headroom permits (Regime 1 & 2), before layer $l$ begins execution, the manager dispatches read-ahead advisories for upcoming layers ($l + 1, \dots, l + \text{depth}$):
     ```c
