@@ -76,6 +76,17 @@ public:
     double get_last_phi() const { return last_phi_; }
     uint8_t get_current_bit_width() const { return current_bit_width_; }
 
+    /**
+     * @brief Records actual measured physical memory reclamation post-eviction.
+     * Updates adaptive calibration factor to minimize estimation bias.
+     */
+    void record_actual_reclaimed(uint64_t actual_reclaimed_bytes);
+
+    double get_adaptive_calibration_factor() const { return adaptive_calib_factor_; }
+    uint64_t get_last_estimated_savings() const { return last_estimated_savings_bytes_; }
+    uint64_t get_last_actual_reclaimed() const { return last_actual_reclaimed_bytes_; }
+    int64_t get_last_estimation_delta() const { return last_estimation_delta_bytes_; }
+
     void reset();
 
 private:
@@ -99,6 +110,11 @@ private:
     bool aggressive_evict_{false};
     uint8_t current_bit_width_{4};
     double last_phi_{0.0};
+
+    double adaptive_calib_factor_{1.0};
+    uint64_t last_estimated_savings_bytes_{0};
+    uint64_t last_actual_reclaimed_bytes_{0};
+    int64_t last_estimation_delta_bytes_{0};
 
     double last_eval_time_{0.0};
     uint64_t last_eval_rss_{0};

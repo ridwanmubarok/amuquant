@@ -180,6 +180,69 @@ int main() {
         turbovec_free(opt_handle);
     }
 
+    // 3. Test Dynamic KV Sizing & Online Adaptive Calibration Telemetry
+    {
+        std::cout << "[TEST] Starting Dynamic KV Sizing & Online Adaptive Calibration Validation..." << std::endl;
+        AMUQuantConfig cfg;
+        cfg.num_layers = 36;
+        cfg.kv_heads = 2;
+        cfg.head_dim = 128;
+        cfg.embedding_dim = 2048;
+        cfg.memory_limit_bytes = 14ULL * 1024ULL * 1024ULL * 1024ULL;
+        cfg.os_reserved_bytes  = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+        cfg.policy = ArbitrationPolicy::THRESHOLD_HYSTERESIS;
+        cfg.theta_low = 0.50;
+        cfg.eval_interval_tokens = 1;
+        cfg.recent_window_tokens = 32;
+        cfg.min_eviction_batch = 16;
+
+        TurbovecIndexHandle* tb_handle = nullptr;
+        turbovec_init(cfg.embedding_dim, cfg.initial_bit_width, &tb_handle);
+
+        auto telemetry = std::make_shared<SystemTelemetry>();
+        telemetry->set_mock_mode(true);
+        auto layer_mgr = std::make_shared<LayerManager>();
+        auto kv_surgeon = std::make_shared<KVSurgeon>(tb_handle, cfg.embedding_dim);
+        AMUQuantController controller(cfg, telemetry, layer_mgr, kv_surgeon, tb_handle);
+
+        assert(controller.get_adaptive_calibration_factor() == 1.0);
+        assert(controller.get_last_estimated_savings() == 0);
+
+        std::vector<float> dummy_vec(cfg.embedding_dim, 0.1f);
+        auto extractor = [&](int32_t) -> const float* { return dummy_vec.data(); };
+        auto seq_rm = [](int32_t, int32_t) {};
+        auto seq_add = [](int32_t, int32_t, int32_t) {};
+
+        // Trigger transition to Regime 2 (Load = 60% > theta_low)
+        MemoryStats s{};
+        s.timestamp_sec = 20.0;
+        s.process_rss_bytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+        telemetry->set_mock_stats(s);
+
+        // Sequence length 100 with window 32 -> evicts middle tokens [4..68) = 64 tokens
+        StepDecision dec = controller.on_token_step(0, 100, extractor, seq_rm, seq_add);
+        assert(dec.regime == Regime::REGIME_2_BALANCED_OFFLOAD);
+        assert(dec.kv_pruned);
+        assert(dec.estimated_savings_bytes > 0);
+        assert(dec.actual_reclaimed_bytes > 0);
+        assert(controller.get_adaptive_calibration_factor() > 0.0);
+        std::cout << "  - Dynamic Sizing & Calibration Telemetry: Estimated = " 
+                  << dec.estimated_savings_bytes << " bytes, Actual = " 
+                  << dec.actual_reclaimed_bytes << " bytes, Delta = "
+                  << dec.estimation_delta_bytes << " bytes, Factor = "
+                  << dec.calibration_factor << ": OK" << std::endl;
+
+        // Test manual calibration adjustment
+        uint64_t fake_actual = dec.estimated_savings_bytes / 2; // Real reclamation was half of estimate
+        controller.record_actual_reclaimed(fake_actual);
+        assert(controller.get_adaptive_calibration_factor() < 1.0); // Factor should downscale
+        assert(controller.get_last_actual_reclaimed() == fake_actual);
+        std::cout << "  - Adaptive Calibration Factor Auto-Adjustment: " 
+                  << controller.get_adaptive_calibration_factor() << ": OK" << std::endl;
+
+        turbovec_free(tb_handle);
+    }
+
     std::cout << "[PASS] All AMUQuantController Policy Validations Succeeded.\n" << std::endl;
     return 0;
 }

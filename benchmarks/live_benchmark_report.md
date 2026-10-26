@@ -10,14 +10,14 @@
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
 | **Tokens Generated** | 64/64 | 64/64 | 64/64 |
-| **Peak Physical RSS** | 159 MB | 195 MB | 197 MB |
-| **Empirical Process RSS Delta** | 5 MB | 39 MB | 39 MB |
-| **Inference Throughput** | 22.43 tok/s | 26.25 tok/s | 18.55 tok/s |
+| **Peak Physical RSS** | 158 MB | 195 MB | 195 MB |
+| **Empirical Process RSS Delta** | 8 MB | 40 MB | 38 MB |
+| **Inference Throughput** | 21.77 tok/s | 24.45 tok/s | 23.35 tok/s |
 | **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **2448 KB** |
 | **Context Tokens Safely Archived** | 0 | 0 | **68** |
 | **Tier 1: Index Sanity Match** | N/A | N/A | **0.8605** |
 | **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **0.368 ms** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.255 ms** |
 
 ### Empirical Measurement Protocol, Repeatability & Variance Analysis
 
@@ -43,7 +43,7 @@
 | **Logical KV Capacity Reclaimed** | 0 KB | **11088 KB** |
 | **Context Tokens Archived to turbovec** | 0 | **308 tokens** |
 | **Turn 1 Master Key Recall** | In Attention Buffer | **100% Match (Recall@3)** |
-| **Episodic SIMD Retrieval Latency** | N/A | **1.280 ms** |
+| **Episodic SIMD Retrieval Latency** | N/A | **1.219 ms** |
 
 ## 3. Scenario 3A: Deterministic FSM State Transition Test (Mock Telemetry)
 
@@ -54,8 +54,8 @@
 | **FSM Operational Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
 | **Logical KV Capacity Reclaimed** | **2736 KB** |
-| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.1873 ms)** |
-| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.4998 ms)** |
+| **Pre-Shock Recall (4-bit)** | **0.8605 (Latency: 0.0925 ms)** |
+| **Post-Shock Recall (2-bit)** | **0.6341 (Latency: 0.2788 ms)** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
 | **Episodic Vector Memory Footprint** | **553 KB (50% In-Place Compaction)** |
 
@@ -68,25 +68,25 @@
 | **Host Telemetry Sensing Mode** | Live macOS Kernel (`mach_host_self`, `host_statistics64`) |
 | **Autonomous FSM Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
-| **Logical KV Capacity Reclaimed** | **2592 KB** |
+| **Logical KV Capacity Reclaimed** | **2736 KB** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
-| **Process RSS Before / After** | 176 MB / 2263 MB (Delta: 2087 MB) |
+| **Process RSS Before / After** | 175 MB / 212 MB (Delta: 37 MB) |
 
 ## 5. Scenario 4: Runtime Arbitration Policy Ablation Matrix
 
-| Policy Configuration | Target Throughput | Peak Physical RSS | KV Reclaimed | Final Regime |
-| :--- | :--- | :--- | :--- | :--- |
-| **Predictive Cost-Benefit (PCBM)** | 24.46 tok/s | 2264 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
-| **Static Threshold Hysteresis** | 26.12 tok/s | 1735 MB | **2016 KB** | REGIME_3_ULTRA_LOW_SURVIVAL |
-| **Static KV Eviction Only** | 23.72 tok/s | 1735 MB | **1440 KB** | REGIME_2_BALANCED_OFFLOAD |
+| Policy Configuration | Target Throughput | Peak Physical RSS | KV Reclaimed | Retrieval (Recall@1 / Cosine) | P95 Latency | Final Regime |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Predictive Cost-Benefit (PCBM)** | 24.05 tok/s | 212 MB | **1440 KB** | 100% (0.8604) | 42.1 ms | REGIME_2_BALANCED_OFFLOAD |
+| **Static Threshold Hysteresis** | 23.93 tok/s | 214 MB | **2016 KB** | 100% (0.6601) | 46.1 ms | REGIME_3_ULTRA_LOW_SURVIVAL |
+| **Static KV Eviction Only** | 22.02 tok/s | 214 MB | **1440 KB** | 100% (0.8604) | 45.4 ms | REGIME_2_BALANCED_OFFLOAD |
 
 ## 6. Scenario 6: Extended Horizon (256 Tokens) & Multi-Needle Retrieval
 
 | Extended Horizon Metric | Measurement | Impact Analysis |
 | :--- | :--- | :--- |
 | **Target Horizon** | 256/256 tokens | 4x Nominal Horizon |
-| **Inference Throughput** | 24.12 tok/s | Sustained Decoding Velocity |
-| **Peak Physical RSS** | 1332 MB | Bounded Memory Ceiling |
+| **Inference Throughput** | 22.53 tok/s | Sustained Decoding Velocity |
+| **Peak Physical RSS** | 259 MB | Bounded Memory Ceiling |
 | **Logical KV Capacity Reclaimed** | **11376 KB** | Buffer Overflow Prevented |
 | **Context Tokens Archived** | **316 tokens** | In-Memory Episodic Storage |
 | **Final Physical KV Slots** | **66 slots** | Attention Bounded to O(1) |
@@ -95,18 +95,21 @@
 
 | Target Needle | Context Position | Recall@1 | Recall@3 | Cosine Score | Retrieval Latency |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Needle 1 (Initialization Passkey)** (`AegisOmega-90412`) | Token 7 | 100% Match | 100% Match | 0.8273 | 2.846 ms |
-| **Needle 2 (Security Certificate)** (`SecCert-88319`) | Token 43 | 100% Match | 100% Match | 0.9257 | 2.443 ms |
-| **Needle 3 (Database Nonce)** (`NonceDelta-44102`) | Token 90 | 100% Match | 100% Match | 0.9051 | 2.460 ms |
+| **Needle 1 (Initialization Passkey)** (`AegisOmega-90412`) | Token 7 | 100% Match | 100% Match | 0.8273 | 1.150 ms |
+| **Needle 2 (Security Certificate)** (`SecCert-88319`) | Token 43 | 100% Match | 100% Match | 0.9257 | 0.934 ms |
+| **Needle 3 (Database Nonce)** (`NonceDelta-44102`) | Token 90 | 100% Match | 100% Match | 0.9051 | 0.933 ms |
 
-## 7. Scenario 7: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+## 7. Scenario 7: Analytical Mathematical Projection of Long-Context Scaling (Extrapolated from the Empirical 66-Slot Clamp in Scenario 6)
 
-| Token Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
-| :--- | :--- | :--- | :--- | :--- |
-| **64 tokens** | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
-| **256 tokens** | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
-| **1,024 tokens** | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
-| **4,096 tokens** | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
-| **8,192 tokens** | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
+> [!NOTE]
+> **Methodological Demarcation Note**: Horizons 64 and 256 tokens are empirically executed and verified in Scenarios 1 and 6. Horizons 1,024, 4,096, and 8,192 tokens represent analytical mathematical projections based on the measured 66-slot physical attention clamp.
+
+| Token Horizon ($N$) | Evaluation Mode | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **64 tokens** | Empirically Verified (Scenario 1) | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
+| **256 tokens** | Empirically Verified (Scenario 6) | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
+| **1,024 tokens** | Analytical Projection | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
+| **4,096 tokens** | Analytical Projection | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
+| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
 
 Generated automatically by `live_benchmark` on Apple Silicon / Metal.

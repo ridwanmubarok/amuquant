@@ -83,9 +83,11 @@ double AMUQuantController::evaluate_action_cost(
                           (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
     if (safe_limit == 0) return 0.0;
 
-    // Estimated memory mitigation per token for candidate action
-    size_t bytes_per_token = 2ULL * config_.num_layers * 8 * 128 * sizeof(uint16_t);
-    if (bytes_per_token == 0) bytes_per_token = 131072;
+    // Dynamic architecture-aware KV sizing: 2 * num_layers * kv_heads * head_dim * sizeof(fp16)
+    uint32_t n_heads = (config_.kv_heads > 0) ? config_.kv_heads : 8;
+    uint32_t d_head = (config_.head_dim > 0) ? config_.head_dim : 128;
+    size_t bytes_per_token = 2ULL * config_.num_layers * n_heads * d_head * sizeof(uint16_t);
+    if (bytes_per_token == 0) bytes_per_token = 36864;
 
     double memory_mitigation_bytes = 0.0;
     double latency_cost = 0.0;
@@ -103,7 +105,8 @@ double AMUQuantController::evaluate_action_cost(
             uint32_t win = config_.recent_window_tokens;
             if (current_seq_len > sink + win) {
                 uint32_t middle_count = current_seq_len - sink - win;
-                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.85;
+                // 4-bit Lloyd-Max compression (~85% logical KV footprint mitigation) calibrated via adaptive_calib_factor_
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.85 * adaptive_calib_factor_;
             }
             latency_cost = 0.05; // ~0.5ms SIMD commit overhead
             quality_loss = 0.14; // 4-bit Lloyd-Max distortion (1 - 0.86 cosine)
@@ -115,7 +118,8 @@ double AMUQuantController::evaluate_action_cost(
             uint32_t win = config_.min_recent_window_tokens;
             if (current_seq_len > sink + win) {
                 uint32_t middle_count = current_seq_len - sink - win;
-                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.93;
+                // 2-bit Lloyd-Max compression (~93% logical KV footprint mitigation) calibrated via adaptive_calib_factor_
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.93 * adaptive_calib_factor_;
             }
             latency_cost = 0.18; // Requantization pass + single-layer paging
             quality_loss = 0.22; // 2-bit Lloyd-Max distortion (1 - 0.78 cosine)
@@ -287,6 +291,11 @@ void AMUQuantController::apply_regime_transition(
     current_regime_ = target;
     decision.regime = target;
 
+    uint32_t n_heads = (config_.kv_heads > 0) ? config_.kv_heads : 8;
+    uint32_t d_head = (config_.head_dim > 0) ? config_.head_dim : 128;
+    size_t bytes_per_token = 2ULL * config_.num_layers * n_heads * d_head * sizeof(uint16_t);
+    if (bytes_per_token == 0) bytes_per_token = 36864;
+
     switch (target) {
         case Regime::REGIME_1_HIGH_THROUGHPUT: {
             prefetch_depth_ = 3;
@@ -311,8 +320,15 @@ void AMUQuantController::apply_regime_transition(
                     config_.min_eviction_batch
                 );
                 if (range.valid()) {
+                    uint32_t count = static_cast<uint32_t>(range.p_end - range.p_start);
+                    last_estimated_savings_bytes_ = static_cast<uint64_t>(
+                        static_cast<double>(count * bytes_per_token) * 0.85 * adaptive_calib_factor_
+                    );
                     bool ok = kv_surgeon_->execute_eviction(range, extractor, seq_rm, seq_add);
                     decision.kv_pruned = ok;
+                    if (ok) {
+                        record_actual_reclaimed(count * bytes_per_token);
+                    }
                 }
             }
             break;
@@ -343,12 +359,35 @@ void AMUQuantController::apply_regime_transition(
                     config_.min_eviction_batch
                 );
                 if (range.valid()) {
+                    uint32_t count = static_cast<uint32_t>(range.p_end - range.p_start);
+                    last_estimated_savings_bytes_ = static_cast<uint64_t>(
+                        static_cast<double>(count * bytes_per_token) * 0.93 * adaptive_calib_factor_
+                    );
                     bool ok = kv_surgeon_->execute_eviction(range, extractor, seq_rm, seq_add);
                     decision.kv_pruned = ok;
+                    if (ok) {
+                        record_actual_reclaimed(count * bytes_per_token);
+                    }
                 }
             }
             break;
         }
+    }
+
+    decision.estimated_savings_bytes = last_estimated_savings_bytes_;
+    decision.actual_reclaimed_bytes = last_actual_reclaimed_bytes_;
+    decision.estimation_delta_bytes = last_estimation_delta_bytes_;
+    decision.calibration_factor = adaptive_calib_factor_;
+}
+
+void AMUQuantController::record_actual_reclaimed(uint64_t actual_reclaimed_bytes) {
+    last_actual_reclaimed_bytes_ = actual_reclaimed_bytes;
+    last_estimation_delta_bytes_ = static_cast<int64_t>(last_estimated_savings_bytes_) - static_cast<int64_t>(actual_reclaimed_bytes);
+
+    if (last_estimated_savings_bytes_ > 0) {
+        double ratio = static_cast<double>(actual_reclaimed_bytes) / static_cast<double>(last_estimated_savings_bytes_);
+        adaptive_calib_factor_ = (0.85 * adaptive_calib_factor_) + (0.15 * ratio);
+        adaptive_calib_factor_ = std::max(0.5, std::min(2.0, adaptive_calib_factor_));
     }
 }
 
@@ -361,6 +400,10 @@ void AMUQuantController::reset() {
     last_eval_time_ = 0.0;
     last_eval_rss_ = 0;
     first_eval_ = true;
+    adaptive_calib_factor_ = 1.0;
+    last_estimated_savings_bytes_ = 0;
+    last_actual_reclaimed_bytes_ = 0;
+    last_estimation_delta_bytes_ = 0;
 }
 
 } // namespace amuquant

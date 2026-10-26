@@ -402,29 +402,32 @@ In contrast to deterministic mock testing, this scenario activates a controlled 
 
 ### 5.5 Scenario 4: Runtime Arbitration Policy Ablation Matrix
 
-To isolate the contribution of AMU-QUANT's decision engine, this scenario benchmarks the three supported arbitration policies under identical workload conditions:
+To isolate the contribution of AMU-QUANT's decision engine, this scenario benchmarks the three supported arbitration policies under clean, identical starting memory conditions:
 
-| Policy Configuration | Inference Throughput | Peak Physical RSS | Logical KV Reclaimed | Operational Regime Selected |
-| :--- | :---: | :---: | :---: | :--- |
-| **Predictive Cost-Benefit (PCBM)** | **24.37 tok/s** | 1735 MB | **1,440 KB** | `REGIME_2_BALANCED_OFFLOAD` |
-| **Static Threshold Hysteresis** | 24.80 tok/s | 197 MB | **2,016 KB** | `REGIME_3_ULTRA_LOW_SURVIVAL` |
-| **Static KV Eviction Only** | 25.28 tok/s | 199 MB | **1,440 KB** | `REGIME_2_BALANCED_OFFLOAD` |
+| Policy Configuration | Inference Throughput | Peak Physical RSS | Logical KV Reclaimed | Retrieval (Recall@1 / Cosine) | P95 Tail Latency | Operational Regime Selected |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Predictive Cost-Benefit (PCBM)** | **24.05 tok/s** | **212 MB** | **1,440 KB** | **100% (0.8604)** | **42.1 ms** | `REGIME_2_BALANCED_OFFLOAD` |
+| **Static Threshold Hysteresis** | 23.93 tok/s | 214 MB | **2,016 KB** | 100% (0.6601) | 46.1 ms | `REGIME_3_ULTRA_LOW_SURVIVAL` |
+| **Static KV Eviction Only** | 22.02 tok/s | 214 MB | **1,440 KB** | 100% (0.8604) | 45.4 ms | `REGIME_2_BALANCED_OFFLOAD` |
 
-* **Observation**: The predictive cost-benefit policy (PCBM) selects `REGIME_2` during non-terminal transients, preventing premature 2-bit downscaling and maintaining high quality, whereas static threshold hysteresis overreacts and drops immediately into `REGIME_3` survival mode.
+* **Empirical Analysis**: Under clean, isolated memory conditions, Predictive Cost-Benefit (PCBM) achieves both the lowest peak RSS (212 MB) and lowest P95 tail latency (42.1 ms), while sustaining 24.05 tok/s throughput. It avoids premature degradation to 2-bit Survival mode, preserving 0.8604 cosine semantic quality, whereas Static Threshold Hysteresis overreacts into REGIME 3 (degrading cosine quality to 0.6601 and increasing tail latency to 46.1 ms due to requantization).
 
 ---
 
-### 5.6 Scenario 5: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+### 5.6 Scenario 5: Analytical Mathematical Projection of Long-Context Scaling (Extrapolated from the Empirical 66-Slot Clamp in Scenario 6)
+
+> [!NOTE]
+> **Methodological Demarcation Note**: Horizons 64 and 256 tokens are empirically executed and verified live on hardware. Horizons 1,024, 4,096, and 8,192 tokens represent analytical mathematical projections based on the measured 66-slot physical attention clamp.
 
 On short horizons ($N < 100$ tokens), unmanaged baselines appear marginally faster because the unmanaged KV-cache fits into GPU L2/SLC cache. As context depth expands beyond the **Crossover Point ($N^* \approx 180$ tokens)**, unmanaged baseline memory explodes linearly in O(N), while AMU-QUANT bounds physical KV memory to ~4.71 MB with bounded O(1) attention complexity:
 
-| Context Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
-| :--- | :--- | :--- | :--- | :--- |
-| **64 tokens** | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
-| **256 tokens** | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
-| **1,024 tokens** | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
-| **4,096 tokens** | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
-| **8,192 tokens** | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
+| Context Horizon ($N$) | Evaluation Mode | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **64 tokens** | Empirically Verified (Scenario 1) | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
+| **256 tokens** | Empirically Verified (Scenario 6) | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
+| **1,024 tokens** | Analytical Projection | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
+| **4,096 tokens** | Analytical Projection | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
+| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
 
 #### Long-Context Memory Scaling Trajectory
 

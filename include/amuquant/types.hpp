@@ -92,6 +92,8 @@ struct AMUQuantConfig {
     // Model architecture parameters
     uint32_t num_layers{64};
     uint32_t embedding_dim{4096};
+    uint32_t kv_heads{8};
+    uint32_t head_dim{128};
     uint8_t initial_bit_width{4};
 
     // Arbitration decision policy and multi-objective weights
@@ -113,6 +115,12 @@ struct StepDecision {
     double phi_score{0.0};
     ArbitrationPolicy policy_used{ArbitrationPolicy::THRESHOLD_HYSTERESIS};
     double selected_utility_cost{0.0};
+
+    // Telemetry tracking: Decision-time estimation vs post-eviction physical reclamation
+    uint64_t estimated_savings_bytes{0};
+    uint64_t actual_reclaimed_bytes{0};
+    int64_t estimation_delta_bytes{0};
+    double calibration_factor{1.0};
 };
 
 inline std::string regime_to_string(Regime r) {

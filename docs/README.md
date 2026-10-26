@@ -1,6 +1,6 @@
 # AMU-QUANT Technical Documentation
 
-This directory contains the scientific specifications, mathematical formulations, subsystem architecture, foreign function interface (FFI) contracts, and experimental evaluation methodology for **AMU-QUANT** (*Co-Adaptive Layer-wise Weight Streaming and TurboQuant Context Compression for On-Device Large Language Model Inference*).
+This directory contains the scientific specifications, mathematical formulations, subsystem architecture, foreign function interface (FFI) contracts, and experimental evaluation methodology for **AMU-QUANT** (*Co-Adaptive Runtime Memory Policy and Transactional KV-Cache Compression for On-Device Large Language Model Inference*).
 
 ---
 
@@ -11,7 +11,7 @@ This directory contains the scientific specifications, mathematical formulations
 | **01** | [**System Architecture**](01_SYSTEM_ARCHITECTURE.md) | High-level subsystem layout (Layer Manager, KV Surgery, FFI Bridge, Controller), zero-copy pointer flows, and thread-safety invariants. |
 | **02** | [**Mathematical Model & Controller**](02_MATHEMATICAL_MODEL_AND_CONTROLLER.md) | Dual-budget memory equilibrium inequality, predictive pressure metric $\Phi_t$, hysteresis state machine, and scheduling algorithm. |
 | **03** | [**turbovec FFI Specification**](03_TURBOVEC_FFI_SPECIFICATION.md) | C-ABI interface header `turbovec_ffi.h`, Rust bridge implementation, Lloyd-Max codebooks, in-place 2-bit requantization, and SIMD vectorization. |
-| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds (8 GB and 16 GB nodes), cross-scale model spectrum (sub-3B, 7B/8B, 14B/32B, 70B+), 4 baseline methods, 3 stress-testing scenarios, and metrics. |
+| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds, locally verified empirical benchmarks (Part I), proposed academic evaluation protocols (Part II), and metrics. |
 | **05** | [**Literature Review & References**](05_LITERATURE_REVIEW_AND_REFERENCES.md) | Critical analysis of AirLLM, llama.cpp mmap, evict-to-trash pruning (StreamingLLM, H2O, ThinKV, Lethe), Data Science & NLP theoretical foundations, and verified citations. |
 
 ---
@@ -22,7 +22,7 @@ This directory contains the scientific specifications, mathematical formulations
 flowchart TD
     subgraph Kernel_OS ["Operating System Kernel & Virtual Memory"]
         VM_Stat["Memory & Swap Telemetry (/proc/meminfo / mach_vm_info)"]
-        KernelMadvise["Kernel Directives: posix_madvise(DONTNEED / WILLNEED)"]
+        KernelMadvise["Kernel Directives: posix_madvise(DONTNEED / WILLNEED) & mincore(2)"]
     end
 
     subgraph AMUQuant_Engine ["AMU-QUANT Co-Adaptive Controller (C++17)"]
@@ -31,7 +31,7 @@ flowchart TD
         RegimeLogic{"Hysteresis State Machine (δ_hyst)"}
         R1["Regime 1: High-Throughput (Max Prefetch)"]
         R2["Regime 2: Balanced Offloading (turbovec 4-bit)"]
-        R3["Regime 3: Ultra-Low Survival (turbovec 2-bit + Strict Streaming)"]
+        R3["Regime 3: Ultra-Low Survival (turbovec 2-bit + Single-Layer Advisory Paging)"]
     end
 
     subgraph Llama_CPP ["Inference Backend: llama.cpp"]
@@ -55,7 +55,7 @@ flowchart TD
     RegimeLogic -->|Φ_t > θ_high| R3
 
     R1 -.->|Prefetch Upcoming Layer Pages| KernelMadvise
-    R2 -->|Trigger KV Eviction & Layer Streaming| Surgery
+    R2 -->|Trigger KV Eviction & Advisory Paging| Surgery
     R3 -->|Trigger In-Place 2-bit Requantization| Requantize
 
     Surgery -->|Pass Pruned Token Pointer| FFI

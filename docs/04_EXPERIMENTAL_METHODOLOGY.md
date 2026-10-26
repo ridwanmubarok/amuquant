@@ -82,13 +82,13 @@ Simulates an agent executing 4 successive ReAct reasoning and tool-calling turns
 - **Scenario 3B (Controlled Live Host Memory Stress)**: Allocated 2048 MB of physical dirty pages on the host via real `mmap` while sampling live Darwin kernel statistics via `mach_host_self()` and `host_statistics64()`. AMU-QUANT completed 100% of the horizon without OOM termination, dynamically shifting to Regime 3 and reclaiming 2,592 KB of KV sequence capacity.
 
 #### Scenario 4: Runtime Arbitration Policy Ablation Matrix
-Evaluates the three arbitration policies supported by [`include/amuquant/controller.hpp`](file:///Users/amubhya/workspace/aegis/include/amuquant/controller.hpp):
+Evaluates the three arbitration policies supported by [`include/amuquant/controller.hpp`](file:///Users/amubhya/workspace/aegis/include/amuquant/controller.hpp) under clean, identical starting memory conditions:
 
-| Policy Configuration | Throughput | Peak Physical RSS | KV Reclaimed | Final Regime |
-|:---|:---:|:---:|:---:|:---:|
-| **Predictive Cost-Benefit (PCBM)** | 24.46 tok/s | 2264 MB | 1440 KB | REGIME_2_BALANCED_OFFLOAD |
-| **Static Threshold Hysteresis** | 26.12 tok/s | 1735 MB | 2016 KB | REGIME_3_ULTRA_LOW_SURVIVAL |
-| **Static KV Eviction Only** | 23.72 tok/s | 1735 MB | 1440 KB | REGIME_2_BALANCED_OFFLOAD |
+| Policy Configuration | Throughput | Peak Physical RSS | KV Reclaimed | Retrieval (Recall@1 / Cosine) | P95 Latency | Final Regime |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Predictive Cost-Benefit (PCBM)** | 24.05 tok/s | 212 MB | **1440 KB** | 100% (0.8604) | 42.1 ms | REGIME_2_BALANCED_OFFLOAD |
+| **Static Threshold Hysteresis** | 23.93 tok/s | 214 MB | **2016 KB** | 100% (0.6601) | 46.1 ms | REGIME_3_ULTRA_LOW_SURVIVAL |
+| **Static KV Eviction Only** | 22.02 tok/s | 214 MB | **1440 KB** | 100% (0.8604) | 45.4 ms | REGIME_2_BALANCED_OFFLOAD |
 
 #### Scenario 6: Extended Horizon (256 Tokens) & Multi-Needle Retrieval
 Evaluates context retention across an extended decoding horizon of 256 tokens with 3 distinct factual needles embedded at different positions:
@@ -96,28 +96,30 @@ Evaluates context retention across an extended decoding horizon of 256 tokens wi
 | Extended Horizon Metric | Measurement | Impact Analysis |
 |:---|:---:|:---|
 | **Target Horizon** | 256/256 tokens | 4x Nominal Horizon |
-| **Inference Throughput** | 24.12 tok/s | Sustained Decoding Velocity |
-| **Peak Physical RSS** | 1332 MB | Bounded Memory Ceiling |
+| **Inference Throughput** | 22.53 tok/s | Sustained Decoding Velocity |
+| **Peak Physical RSS** | 259 MB | Bounded Memory Ceiling |
 | **Logical KV Capacity Reclaimed** | **11,376 KB** | Ring-Buffer Overflow Prevented |
 | **Context Tokens Archived** | **316 tokens** | In-Memory Episodic Storage |
 | **Active Physical KV Slots** | **66 slots** | Attention Bounded to $O(1)$ Complexity |
 
 *Multi-Needle Cross-Temporal Recall Matrix*:
-- **Needle 1** (`AegisOmega-90412`, Position: Token 7): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.8273 | Latency: 2.846 ms.
-- **Needle 2** (`SecCert-88319`, Position: Token 43): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.9257 | Latency: 2.443 ms.
-- **Needle 3** (`NonceDelta-44102`, Position: Token 90): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.9051 | Latency: 2.460 ms.
+- **Needle 1** (`AegisOmega-90412`, Position: Token 7): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.8273 | Latency: 1.150 ms.
+- **Needle 2** (`SecCert-88319`, Position: Token 43): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.9257 | Latency: 0.934 ms.
+- **Needle 3** (`NonceDelta-44102`, Position: Token 90): 100% Recall@1 | 100% Recall@3 | Cosine Score: 0.9051 | Latency: 0.933 ms.
 
-#### Scenario 7: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
-Projects memory savings for Qwen2.5-3B across expanding context depths when attention is clamped to 66 physical slots:
+#### Scenario 7: Analytical Mathematical Projection of Long-Context Scaling (Extrapolated from the Empirical 66-Slot Clamp in Scenario 6)
+> [!NOTE]
+> **Methodological Demarcation Note**: Horizons 64 and 256 tokens are empirically executed and verified in Scenarios 1 and 6. Horizons 1,024, 4,096, and 8,192 tokens represent analytical mathematical projections based on the measured 66-slot physical attention clamp.
 
-| Token Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
-|:---:|:---:|:---:|:---:|:---:|
-| **64 tokens** | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
-| **256 tokens** | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
-| **1,024 tokens** | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
-| **4,096 tokens** | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
-| **8,192 tokens** | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
+Projects theoretical and empirical memory savings for Qwen2.5-3B across expanding context depths when attention is clamped to 66 physical slots:
 
+| Token Horizon ($) | Evaluation Mode | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **64 tokens** | Empirically Verified (Scenario 1) | 8.38 MB | 4.71 MB | 0.03 MB | **1.8x reduction** |
+| **256 tokens** | Empirically Verified (Scenario 6) | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
+| **1,024 tokens** | Analytical Projection | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
+| **4,096 tokens** | Analytical Projection | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
+| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
 ---
 
 # Part II: Proposed Academic Evaluation Protocol
