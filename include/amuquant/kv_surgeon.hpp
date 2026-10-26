@@ -106,7 +106,7 @@ public:
     /**
      * @brief Computes middle-token eviction bounds preserving initial sink tokens and recent window.
      */
-    EvictionRange plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window) const;
+    EvictionRange plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window, uint32_t min_batch = 1) const;
 
     /**
      * @brief Extracts candidate KV tokens into TurboQuant index, prunes cache sequence, and applies RoPE delta.

@@ -8,7 +8,7 @@ namespace amuquant {
 KVSurgeon::KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim)
     : turbovec_idx_(turbovec_idx), embedding_dim_(embedding_dim) {}
 
-EvictionRange KVSurgeon::plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window) const {
+EvictionRange KVSurgeon::plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window, uint32_t min_batch) const {
     if (current_token_len <= sink_size + recent_window) {
         return {-1, -1};
     }
@@ -16,7 +16,7 @@ EvictionRange KVSurgeon::plan_eviction(uint32_t current_token_len, uint32_t sink
     int32_t p_start = static_cast<int32_t>(sink_size);
     int32_t p_end = static_cast<int32_t>(current_token_len - recent_window);
 
-    if (p_end > p_start) {
+    if (p_end > p_start && static_cast<uint32_t>(p_end - p_start) >= min_batch) {
         return {p_start, p_end};
     }
     return {-1, -1};

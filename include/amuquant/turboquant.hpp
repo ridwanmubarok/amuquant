@@ -71,6 +71,7 @@ private:
     std::vector<float> centroids_2bit_;
     std::vector<float> thresholds_2bit_;
     std::vector<QuantizedVector> vectors_;
+    mutable std::vector<float> scratch_rotated_;
 
     void init_codebooks();
     void generate_orthogonal_matrix();

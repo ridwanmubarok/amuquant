@@ -38,6 +38,39 @@ struct BenchmarkRunResult {
     Regime final_regime{Regime::REGIME_1_HIGH_THROUGHPUT};
 };
 
+/**
+ * @brief High-performance contiguous embedding storage eliminating per-token heap allocations.
+ */
+struct ContiguousEmbeddingStore {
+    uint32_t embedding_dim{4096};
+    std::vector<float> data_pool;
+    size_t count{0};
+
+    void reserve(size_t max_tokens, uint32_t dim) {
+        embedding_dim = dim;
+        data_pool.resize(max_tokens * dim, 0.0f);
+        count = 0;
+    }
+
+    void append(const float* embd) {
+        if (embd != nullptr) {
+            std::memcpy(&data_pool[count * embedding_dim], embd, embedding_dim * sizeof(float));
+        } else {
+            std::memset(&data_pool[count * embedding_dim], 0, embedding_dim * sizeof(float));
+        }
+        count++;
+    }
+
+    const float* get(size_t index) const {
+        if (index < count) return &data_pool[index * embedding_dim];
+        return nullptr;
+    }
+
+    size_t size() const { return count; }
+
+    void clear() { count = 0; }
+};
+
 static int get_optimal_pcores() {
 #if defined(__APPLE__)
     int pcores = 0;
@@ -51,7 +84,7 @@ static int get_optimal_pcores() {
 
 int main(int argc, char** argv) {
     std::string model_path = "models/Meta-Llama-3-8B-Instruct-Q2_K.gguf";
-    uint32_t target_tokens = 32;
+    uint32_t target_tokens = 64;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -108,6 +141,30 @@ int main(int argc, char** argv) {
     assert(n_prompt > 0);
 
     SystemTelemetry telemetry_sampler;
+
+    // Pre-warm Metal GPU shader compilation pipeline so cold-start compilation does not distort Run 1
+    std::cout << "[INFO] Pre-warming GPU Metal kernel pipelines..." << std::flush;
+    {
+        llama_context_params w_cparams = llama_context_default_params();
+        w_cparams.n_ctx = 256;
+        w_cparams.n_batch = 128;
+        w_cparams.n_threads = pcore_threads;
+        w_cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+        llama_context* w_ctx = llama_init_from_model(model, w_cparams);
+        if (w_ctx) {
+            llama_batch w_batch = llama_batch_init(8, 0, 1);
+            w_batch.token[0] = prompt_tokens[0];
+            w_batch.pos[0] = 0;
+            w_batch.n_seq_id[0] = 1;
+            w_batch.seq_id[0][0] = 0;
+            w_batch.logits[0] = true;
+            w_batch.n_tokens = 1;
+            llama_decode(w_ctx, w_batch);
+            llama_batch_free(w_batch);
+            llama_free(w_ctx);
+        }
+    }
+    std::cout << " Done.\n\n";
 
     // =========================================================================
     // RUN 1: UNINSTRUMENTED BASELINE (Vanilla llama.cpp, embeddings = false)
@@ -213,6 +270,9 @@ int main(int argc, char** argv) {
         llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
         llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
+        ContiguousEmbeddingStore parity_embeddings;
+        parity_embeddings.reserve(n_prompt + target_tokens + 32, embedding_length);
+
         MemoryStats m_init = telemetry_sampler.sample();
         parity_baseline_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
         parity_baseline_res.peak_rss_mb = parity_baseline_res.initial_rss_mb;
@@ -229,6 +289,11 @@ int main(int argc, char** argv) {
         }
 
         llama_decode(ctx, batch);
+        for (int i = 0; i < n_prompt; ++i) {
+            const float* embd = llama_get_embeddings_ith(ctx, i);
+            parity_embeddings.append(embd);
+        }
+
         int32_t n_past = n_prompt;
 
         auto t_start = std::chrono::steady_clock::now();
@@ -249,6 +314,9 @@ int main(int argc, char** argv) {
             batch.logits[0] = true;
 
             if (llama_decode(ctx, batch) != 0) break;
+
+            const float* embd = llama_get_embeddings_ith(ctx, 0);
+            parity_embeddings.append(embd);
 
             n_past++;
             parity_baseline_res.tokens_generated++;
@@ -288,9 +356,10 @@ int main(int argc, char** argv) {
         cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // OS stability headroom
         cfg.num_layers = block_count;
         cfg.embedding_dim = embedding_length;
-        cfg.eval_interval_tokens = 4;
-        cfg.recent_window_tokens = 24; // Surgical window for prompt eviction
-        cfg.min_recent_window_tokens = 12;
+        cfg.eval_interval_tokens = 8; // Lightweight telemetry cadence
+        cfg.min_eviction_batch = 16;  // Batched eviction minimizing Metal GPU flushes
+        cfg.recent_window_tokens = 32;
+        cfg.min_recent_window_tokens = 16;
         cfg.attention_sink_tokens = 4;
 
         AMUQuantEngine engine(cfg);
@@ -310,15 +379,13 @@ int main(int argc, char** argv) {
         llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
         llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
-        // Persistent context representations indexed by immutable logical token IDs
-        std::vector<std::vector<float>> session_embeddings;
+        // Persistent context representations in zero-allocation pool
+        ContiguousEmbeddingStore session_embeddings;
+        session_embeddings.reserve(n_prompt + target_tokens + 32, embedding_length);
         llama_memory_t mem = llama_get_memory(ctx);
 
         auto extractor = [&](int32_t logical_id) -> const float* {
-            if (logical_id >= 0 && logical_id < static_cast<int32_t>(session_embeddings.size())) {
-                return session_embeddings[logical_id].data();
-            }
-            return nullptr;
+            return session_embeddings.get(static_cast<size_t>(logical_id));
         };
 
         auto seq_rm = [&](int32_t p0, int32_t p1) {
@@ -352,15 +419,10 @@ int main(int argc, char** argv) {
 
         llama_decode(ctx, batch);
 
-        // Extract genuine hidden-state embeddings for all prompt tokens
+        // Extract genuine hidden-state embeddings for all prompt tokens into contiguous pool
         for (int i = 0; i < n_prompt; ++i) {
             const float* embd = llama_get_embeddings_ith(ctx, i);
-            if (embd != nullptr) {
-                session_embeddings.push_back(std::vector<float>(embd, embd + embedding_length));
-            } else {
-                std::cerr << "[ERROR] Could not extract prompt embedding at index " << i << std::endl;
-                session_embeddings.push_back(std::vector<float>(embedding_length, 0.0f));
-            }
+            session_embeddings.append(embd);
         }
 
         int32_t n_past = n_prompt;
@@ -395,11 +457,7 @@ int main(int argc, char** argv) {
             if (llama_decode(ctx, batch) != 0) break;
 
             const float* embd = llama_get_embeddings_ith(ctx, 0);
-            if (embd != nullptr) {
-                session_embeddings.push_back(std::vector<float>(embd, embd + embedding_length));
-            } else {
-                session_embeddings.push_back(std::vector<float>(embedding_length, 0.0f));
-            }
+            session_embeddings.append(embd);
 
             n_past++;
             amuquant_res.tokens_generated++;
@@ -425,7 +483,7 @@ int main(int argc, char** argv) {
         constexpr uint32_t TEST_ARCHIVE_POS = 8;
         if (TEST_ARCHIVE_POS < session_embeddings.size()) {
             auto t_rec_start = std::chrono::high_resolution_clock::now();
-            auto recall_results = engine.recall_context(session_embeddings[TEST_ARCHIVE_POS].data(), 3);
+            auto recall_results = engine.recall_context(session_embeddings.get(TEST_ARCHIVE_POS), 3);
             auto t_rec_end = std::chrono::high_resolution_clock::now();
             amuquant_res.recall_latency_ms = std::chrono::duration<double, std::milli>(t_rec_end - t_rec_start).count();
             if (!recall_results.empty() && recall_results[0].id == TEST_ARCHIVE_POS) {
@@ -476,7 +534,7 @@ int main(int argc, char** argv) {
     std::cout << std::left << std::setw(32) << "KV Memory Reclaimed (KB)"
               << std::setw(20) << "0 KB"
               << std::setw(20) << "0 KB"
-              << std::setw(20) << std::to_string(amuquant_res.kv_memory_reclaimed_kb) + " KB" << "\n";
+              << std::setw(20) << (std::to_string(amuquant_res.kv_memory_reclaimed_kb) + " KB") << "\n";
     std::cout << std::left << std::setw(32) << "Context Tokens Archived"
               << std::setw(20) << "0"
               << std::setw(20) << "0"

@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
         cfg.memory_limit_bytes = 800ULL * 1024ULL * 1024ULL;
         cfg.os_reserved_bytes  = 200ULL * 1024ULL * 1024ULL;
     }
-    cfg.eval_interval_tokens = 4;
+    cfg.eval_interval_tokens = 8;
     cfg.recent_window_tokens = 64;
     cfg.min_recent_window_tokens = 16;
     cfg.attention_sink_tokens = 4;
@@ -251,16 +251,45 @@ int main(int argc, char** argv) {
 
     print_banner(model_info, init_mem, gpu_layers, pcore_threads, true);
 
+    // Contiguous zero-allocation context embedding store
+    struct ContiguousEmbeddingStore {
+        uint32_t embedding_dim{4096};
+        std::vector<float> data_pool;
+        size_t count{0};
+
+        void reserve(size_t max_tokens, uint32_t dim) {
+            embedding_dim = dim;
+            data_pool.resize(max_tokens * dim, 0.0f);
+            count = 0;
+        }
+
+        void append(const float* embd) {
+            if (embd != nullptr) {
+                std::memcpy(&data_pool[count * embedding_dim], embd, embedding_dim * sizeof(float));
+            } else {
+                std::memset(&data_pool[count * embedding_dim], 0, embedding_dim * sizeof(float));
+            }
+            count++;
+        }
+
+        const float* get(size_t index) const {
+            if (index < count) return &data_pool[index * embedding_dim];
+            return nullptr;
+        }
+
+        size_t size() const { return count; }
+
+        void clear() { count = 0; }
+    };
+
     // Context tracking state
     int32_t n_past = 0;
-    std::vector<std::vector<float>> session_embeddings;
+    ContiguousEmbeddingStore session_embeddings;
+    session_embeddings.reserve(8192, model_info.embedding_length);
     llama_memory_t mem = llama_get_memory(ctx);
 
     auto extractor = [&](int32_t logical_id) -> const float* {
-        if (logical_id >= 0 && logical_id < static_cast<int32_t>(session_embeddings.size())) {
-            return session_embeddings[logical_id].data();
-        }
-        return nullptr;
+        return session_embeddings.get(static_cast<size_t>(logical_id));
     };
 
     int32_t total_rope_shift = 0;
@@ -300,11 +329,7 @@ int main(int argc, char** argv) {
         if (llama_decode(ctx, batch) == 0) {
             for (int i = 0; i < n_sys; ++i) {
                 const float* embd = llama_get_embeddings_ith(ctx, i);
-                if (embd != nullptr) {
-                    session_embeddings.push_back(std::vector<float>(embd, embd + model_info.embedding_length));
-                } else {
-                    session_embeddings.push_back(std::vector<float>(model_info.embedding_length, 0.0f));
-                }
+                session_embeddings.append(embd);
             }
             n_past += n_sys;
         }
@@ -388,11 +413,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n_tokens; ++i) {
             engine.append_token(session_embeddings.size());
             const float* embd = llama_get_embeddings_ith(ctx, i);
-            if (embd != nullptr) {
-                session_embeddings.push_back(std::vector<float>(embd, embd + model_info.embedding_length));
-            } else {
-                session_embeddings.push_back(std::vector<float>(model_info.embedding_length, 0.0f));
-            }
+            session_embeddings.append(embd);
         }
         n_past += n_tokens;
 
@@ -444,11 +465,7 @@ int main(int argc, char** argv) {
             }
 
             const float* embd = llama_get_embeddings_ith(ctx, 0);
-            if (embd != nullptr) {
-                session_embeddings.push_back(std::vector<float>(embd, embd + model_info.embedding_length));
-            } else {
-                session_embeddings.push_back(std::vector<float>(model_info.embedding_length, 0.0f));
-            }
+            session_embeddings.append(embd);
 
             n_past++;
             generated_tokens++;

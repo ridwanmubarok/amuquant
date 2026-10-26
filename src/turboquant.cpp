@@ -34,6 +34,7 @@ const float LLOYD_MAX_2BIT_CENTROIDS[4] = {
 
 TurboQuantEngine::TurboQuantEngine(uint32_t dimension, uint8_t bit_width)
     : dimension_(dimension), bit_width_(bit_width) {
+    scratch_rotated_.resize(dimension, 0.0f);
     init_codebooks();
     generate_orthogonal_matrix();
 }
@@ -106,48 +107,68 @@ void TurboQuantEngine::rotate_vector(const float* in, float* out) const {
         size_t offset = b * BLOCK_SIZE;
         size_t current_len = std::min(BLOCK_SIZE, static_cast<size_t>(dimension_ - offset));
 
+#if defined(__ARM_NEON)
+        size_t i = 0;
+        // 4-way unrolled row processing: saturates M1/NEON execution pipelines with 4 parallel FMA streams
+        for (; i + 4 <= current_len; i += 4) {
+            const float* row0 = block + (i + 0) * BLOCK_SIZE;
+            const float* row1 = block + (i + 1) * BLOCK_SIZE;
+            const float* row2 = block + (i + 2) * BLOCK_SIZE;
+            const float* row3 = block + (i + 3) * BLOCK_SIZE;
+
+            float32x4_t s0 = vdupq_n_f32(0.0f);
+            float32x4_t s1 = vdupq_n_f32(0.0f);
+            float32x4_t s2 = vdupq_n_f32(0.0f);
+            float32x4_t s3 = vdupq_n_f32(0.0f);
+
+            for (size_t k = 0; k < BLOCK_SIZE; k += 4) {
+                float32x4_t vin = vld1q_f32(in + offset + k);
+                s0 = vfmaq_f32(s0, vin, vld1q_f32(row0 + k));
+                s1 = vfmaq_f32(s1, vin, vld1q_f32(row1 + k));
+                s2 = vfmaq_f32(s2, vin, vld1q_f32(row2 + k));
+                s3 = vfmaq_f32(s3, vin, vld1q_f32(row3 + k));
+            }
+
+            out[offset + i + 0] = vaddvq_f32(s0);
+            out[offset + i + 1] = vaddvq_f32(s1);
+            out[offset + i + 2] = vaddvq_f32(s2);
+            out[offset + i + 3] = vaddvq_f32(s3);
+        }
+        for (; i < current_len; ++i) {
+            const float* row = block + i * BLOCK_SIZE;
+            float32x4_t s = vdupq_n_f32(0.0f);
+            for (size_t k = 0; k < BLOCK_SIZE; k += 4) {
+                s = vfmaq_f32(s, vld1q_f32(in + offset + k), vld1q_f32(row + k));
+            }
+            out[offset + i] = vaddvq_f32(s);
+        }
+#else
         for (size_t i = 0; i < current_len; ++i) {
             const float* row = block + i * BLOCK_SIZE;
             float sum = 0.0f;
-
-#if defined(__ARM_NEON)
-            float32x4_t vsum = vdupq_n_f32(0.0f);
-            size_t k = 0;
-            for (; k + 4 <= current_len; k += 4) {
-                float32x4_t vin = vld1q_f32(in + offset + k);
-                float32x4_t vrow = vld1q_f32(row + k);
-                vsum = vfmaq_f32(vsum, vin, vrow);
-            }
-            sum = vaddvq_f32(vsum);
-            for (; k < current_len; ++k) {
-                sum += (in + offset)[k] * row[k];
-            }
-#else
             for (size_t k = 0; k < current_len; ++k) {
                 sum += (in + offset)[k] * row[k];
             }
-#endif
             out[offset + i] = sum;
         }
+#endif
     }
 }
 
 uint8_t TurboQuantEngine::quantize_scalar_4bit(float val) const {
-    for (uint8_t i = 0; i < 15; ++i) {
-        if (val < thresholds_4bit_[i]) {
-            return i;
-        }
-    }
-    return 15;
+    // Unrolled branchless binary search over 15 thresholds in exactly 4 steps
+    uint8_t idx = (val >= thresholds_4bit_[7]) ? 8 : 0;
+    idx += (val >= thresholds_4bit_[idx + 3]) ? 4 : 0;
+    idx += (val >= thresholds_4bit_[idx + 1]) ? 2 : 0;
+    idx += (val >= thresholds_4bit_[idx]) ? 1 : 0;
+    return idx;
 }
 
 uint8_t TurboQuantEngine::quantize_scalar_2bit(float val) const {
-    for (uint8_t i = 0; i < 3; ++i) {
-        if (val < thresholds_2bit_[i]) {
-            return i;
-        }
-    }
-    return 3;
+    // Unrolled branchless binary search over 3 thresholds in exactly 2 steps
+    uint8_t idx = (val >= thresholds_2bit_[1]) ? 2 : 0;
+    idx += (val >= thresholds_2bit_[idx]) ? 1 : 0;
+    return idx;
 }
 
 void TurboQuantEngine::insert(uint64_t chunk_id, const float* data, size_t len) {
@@ -164,9 +185,12 @@ void TurboQuantEngine::insert(uint64_t chunk_id, const float* data, size_t len) 
     float sigma = (norm > 1e-12f) ? (norm / std::sqrt(static_cast<float>(dimension_))) : 1e-6f;
     float inv_sigma = 1.0f / sigma;
 
-    // 2. Project through block-orthogonal rotation
-    std::vector<float> rotated(dimension_);
-    rotate_vector(data, rotated.data());
+    // 2. Project through block-orthogonal rotation (zero-allocation scratchpad)
+    if (scratch_rotated_.size() != dimension_) {
+        scratch_rotated_.resize(dimension_);
+    }
+    rotate_vector(data, scratch_rotated_.data());
+    const float* rotated = scratch_rotated_.data();
 
     // 3. Lloyd-Max scalar quantization and nibble packing
     QuantizedVector qv;

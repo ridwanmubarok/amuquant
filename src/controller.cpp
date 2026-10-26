@@ -169,7 +169,8 @@ void AMUQuantController::apply_regime_transition(
                 auto range = kv_surgeon_->plan_eviction(
                     current_seq_len,
                     config_.attention_sink_tokens,
-                    config_.recent_window_tokens
+                    config_.recent_window_tokens,
+                    config_.min_eviction_batch
                 );
                 if (range.valid()) {
                     bool ok = kv_surgeon_->execute_eviction(range, extractor, seq_rm, seq_add);
@@ -197,7 +198,8 @@ void AMUQuantController::apply_regime_transition(
                 auto range = kv_surgeon_->plan_eviction(
                     current_seq_len,
                     config_.attention_sink_tokens,
-                    config_.min_recent_window_tokens
+                    config_.min_recent_window_tokens,
+                    config_.min_eviction_batch
                 );
                 if (range.valid()) {
                     bool ok = kv_surgeon_->execute_eviction(range, extractor, seq_rm, seq_add);

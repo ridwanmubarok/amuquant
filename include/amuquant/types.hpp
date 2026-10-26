@@ -69,6 +69,7 @@ struct AMUQuantConfig {
     uint32_t attention_sink_tokens{4};
     uint32_t recent_window_tokens{256};
     uint32_t min_recent_window_tokens{64}; // Emergency clamp for Regime 3
+    uint32_t min_eviction_batch{1};        // Minimum token slice to trigger batched eviction
     
     // Model architecture parameters
     uint32_t num_layers{64};
