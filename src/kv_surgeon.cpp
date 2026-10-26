@@ -7,6 +7,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <future>
 
 namespace amuquant {
 
@@ -21,24 +22,55 @@ public:
         stop();
     }
 
-    void enqueue(uint64_t logical_id, const float* data) {
-        if (!data || stop_.load(std::memory_order_relaxed)) return;
-        Task task;
-        task.logical_id = logical_id;
-        task.data.assign(data, data + embedding_dim_);
+    /**
+     * @brief Commits an eviction batch to TurboQuant episodic vector memory.
+     * Blocks caller until the worker thread verifies that every vector in the batch
+     * has been successfully inserted into the index.
+     * @return true if all vectors were safely archived; false if any insertion failed.
+     */
+    bool commit_batch(const std::vector<uint64_t>& logical_ids, const std::vector<const float*>& extracted_vecs) {
+        if (stop_.load(std::memory_order_relaxed) || !turbovec_idx_) {
+            return false;
+        }
+        if (logical_ids.empty()) {
+            return true;
+        }
+        if (logical_ids.size() != extracted_vecs.size()) {
+            return false;
+        }
 
-        pending_count_.fetch_add(1, std::memory_order_acq_rel);
+        auto promise = std::make_shared<std::promise<bool>>();
+        std::future<bool> future = promise->get_future();
+
+        BatchTask task;
+        task.logical_ids = logical_ids;
+        task.data.resize(logical_ids.size());
+        for (size_t i = 0; i < logical_ids.size(); ++i) {
+            if (!extracted_vecs[i]) {
+                return false;
+            }
+            task.data[i].assign(extracted_vecs[i], extracted_vecs[i] + embedding_dim_);
+        }
+        task.promise_status = promise;
+
+        pending_batches_.fetch_add(1, std::memory_order_acq_rel);
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
-            queue_.push(std::move(task));
+            batch_queue_.push(std::move(task));
         }
         cv_work_.notify_one();
+
+        try {
+            return future.get();
+        } catch (...) {
+            return false;
+        }
     }
 
     void flush() {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         cv_done_.wait(lock, [this] {
-            return pending_count_.load(std::memory_order_acquire) == 0;
+            return pending_batches_.load(std::memory_order_acquire) == 0;
         });
     }
 
@@ -49,35 +81,60 @@ public:
             if (worker_.joinable()) {
                 worker_.join();
             }
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            while (!batch_queue_.empty()) {
+                auto& t = batch_queue_.front();
+                if (t.promise_status) {
+                    try {
+                        t.promise_status->set_value(false);
+                    } catch (...) {}
+                }
+                batch_queue_.pop();
+            }
+            pending_batches_.store(0, std::memory_order_release);
+            cv_done_.notify_all();
         }
     }
 
 private:
     void worker_loop() {
         while (true) {
-            Task task;
+            BatchTask task;
             {
                 std::unique_lock<std::mutex> lock(queue_mutex_);
                 cv_work_.wait(lock, [this] {
-                    return stop_.load(std::memory_order_relaxed) || !queue_.empty();
+                    return stop_.load(std::memory_order_relaxed) || !batch_queue_.empty();
                 });
 
-                if (stop_.load(std::memory_order_relaxed) && queue_.empty()) {
+                if (stop_.load(std::memory_order_relaxed) && batch_queue_.empty()) {
                     break;
                 }
 
-                task = std::move(queue_.front());
-                queue_.pop();
+                task = std::move(batch_queue_.front());
+                batch_queue_.pop();
             }
 
-            turbovec_insert_zero_copy(
-                turbovec_idx_,
-                task.logical_id,
-                task.data.data(),
-                embedding_dim_
-            );
+            bool all_ok = true;
+            for (size_t i = 0; i < task.logical_ids.size(); ++i) {
+                TurbovecStatus st = turbovec_insert_zero_copy(
+                    turbovec_idx_,
+                    task.logical_ids[i],
+                    task.data[i].data(),
+                    embedding_dim_
+                );
+                if (st != TURBOVEC_STATUS_OK) {
+                    all_ok = false;
+                    break;
+                }
+            }
 
-            size_t rem = pending_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+            if (task.promise_status) {
+                try {
+                    task.promise_status->set_value(all_ok);
+                } catch (...) {}
+            }
+
+            size_t rem = pending_batches_.fetch_sub(1, std::memory_order_acq_rel) - 1;
             if (rem == 0) {
                 std::lock_guard<std::mutex> lock(queue_mutex_);
                 cv_done_.notify_all();
@@ -87,16 +144,17 @@ private:
 
     TurbovecIndexHandle* turbovec_idx_{nullptr};
     uint32_t embedding_dim_{0};
-    struct Task {
-        uint64_t logical_id{0};
-        std::vector<float> data;
+    struct BatchTask {
+        std::vector<uint64_t> logical_ids;
+        std::vector<std::vector<float>> data;
+        std::shared_ptr<std::promise<bool>> promise_status;
     };
-    std::queue<Task> queue_;
+    std::queue<BatchTask> batch_queue_;
     std::mutex queue_mutex_;
     std::condition_variable cv_work_;
     std::condition_variable cv_done_;
     std::atomic<bool> stop_{false};
-    std::atomic<size_t> pending_count_{0};
+    std::atomic<size_t> pending_batches_{0};
     std::thread worker_;
 };
 
@@ -175,8 +233,10 @@ bool KVSurgeon::execute_eviction(
 
     // Insert verified representations into TurboQuant vector index under immutable logical IDs
     if (async_archiver_) {
-        for (size_t i = 0; i < count; ++i) {
-            async_archiver_->enqueue(logical_ids[i], extracted_vecs[i]);
+        bool commit_ok = async_archiver_->commit_batch(logical_ids, extracted_vecs);
+        if (!commit_ok) {
+            // Insertion into vector memory failed or was aborted: preserve KV cache
+            return false;
         }
     } else {
         for (size_t i = 0; i < count; ++i) {

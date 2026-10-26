@@ -11,7 +11,7 @@
 using namespace amuquant;
 
 int main() {
-    std::cout << "[TEST] Starting AMUQuantController & State Machine Validation..." << std::endl;
+    std::cout << "[TEST] Starting Deterministic FSM State Transition & Hysteresis Validation (Mock Telemetry)..." << std::endl;
 
     AMUQuantConfig cfg;
     cfg.memory_limit_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL; // 16 GB

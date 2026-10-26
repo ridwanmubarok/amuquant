@@ -61,7 +61,104 @@ struct RealisticKVCache {
     }
 };
 
+static void test_transactional_eviction_rollback() {
+    std::cout << "[TEST] Running Transactional Eviction & Rollback Verification..." << std::endl;
+    TurbovecIndexHandle* handle = nullptr;
+    TurbovecStatus st = turbovec_init(128, 4, &handle);
+    assert(st == TURBOVEC_STATUS_OK && handle != nullptr);
+
+    {
+        KVSurgeon surgeon(handle, 128, true); // Async archiver enabled
+        TokenIndexMap& tmap = surgeon.get_token_map();
+        tmap.init(30);
+
+        std::vector<float> sample_vec(128, 0.42f);
+        int rm_calls = 0;
+        int add_calls = 0;
+        auto seq_rm = [&](int32_t, int32_t) { rm_calls++; };
+        auto seq_add = [&](int32_t, int32_t, int32_t) { add_calls++; };
+
+        // Test 1: Extractor fails on token pos 10
+        auto failing_extractor = [&](int32_t pos) -> const float* {
+            if (pos == 10) return nullptr;
+            return sample_vec.data();
+        };
+
+        EvictionRange range{4, 20}; // 16 middle tokens
+        bool success = surgeon.execute_eviction(range, failing_extractor, seq_rm, seq_add);
+        assert(!success);
+        assert(rm_calls == 0); // seq_rm was NEVER called
+        assert(add_calls == 0); // seq_add was NEVER called
+        assert(tmap.physical_size() == 30); // token map unchanged
+        for (int i = 0; i < 30; ++i) {
+            assert(tmap.get_logical_id(i) == static_cast<uint64_t>(i));
+        }
+        std::cout << "  - Phase 1 Extractor Failure -> Eviction Aborted & Zero KV Pruning: OK" << std::endl;
+
+        // Test 2: Valid extractor succeeds, commits transactionally
+        auto valid_extractor = [&](int32_t) -> const float* {
+            return sample_vec.data();
+        };
+        success = surgeon.execute_eviction(range, valid_extractor, seq_rm, seq_add);
+        assert(success);
+        assert(rm_calls == 1);
+        assert(add_calls == 1);
+        assert(tmap.physical_size() == 14); // 30 - 16 = 14
+        // Initial sink tokens preserved [0..3]
+        for (int i = 0; i < 4; ++i) {
+            assert(tmap.get_logical_id(i) == static_cast<uint64_t>(i));
+        }
+        // Recent tokens shifted: slot 4 corresponds to original token 20
+        for (int i = 4; i < 14; ++i) {
+            assert(tmap.get_logical_id(i) == static_cast<uint64_t>(i + 16));
+        }
+        std::cout << "  - Phase 2 Valid Commit -> Batch Verified & KV Pruned Cleanly: OK" << std::endl;
+    }
+
+    turbovec_free(handle);
+}
+
+static void test_repeated_eviction_invariants() {
+    std::cout << "[TEST] Running Repeated Eviction Invariant Checks..." << std::endl;
+    TurbovecIndexHandle* handle = nullptr;
+    TurbovecStatus st = turbovec_init(64, 4, &handle);
+    assert(st == TURBOVEC_STATUS_OK && handle != nullptr);
+
+    {
+        KVSurgeon surgeon(handle, 64, true);
+        TokenIndexMap& tmap = surgeon.get_token_map();
+        tmap.init(60); // 60 initial prompt tokens
+
+        std::vector<float> dummy(64, 0.1f);
+        auto extractor = [&](int32_t) -> const float* { return dummy.data(); };
+        auto seq_rm = [](int32_t, int32_t) {};
+        auto seq_add = [](int32_t, int32_t, int32_t) {};
+
+        // Round 1: Evict [4, 24) (20 tokens)
+        bool ok1 = surgeon.execute_eviction({4, 24}, extractor, seq_rm, seq_add);
+        assert(ok1);
+        assert(tmap.physical_size() == 40);
+
+        // Round 2: Evict [4, 14) (10 more tokens)
+        bool ok2 = surgeon.execute_eviction({4, 14}, extractor, seq_rm, seq_add);
+        assert(ok2);
+        assert(tmap.physical_size() == 30);
+
+        // Verify logical mapping consistency
+        for (size_t p = 0; p < tmap.physical_size(); ++p) {
+            uint64_t lid = tmap.get_logical_id(static_cast<int32_t>(p));
+            assert(lid != UINT64_MAX);
+            assert(tmap.get_physical_pos(lid) == static_cast<int32_t>(p));
+        }
+        std::cout << "  - Multi-Round Consecutive Evictions -> Token Mapping Monotonic & Invertible: OK" << std::endl;
+    }
+
+    turbovec_free(handle);
+}
+
 int main() {
+    test_transactional_eviction_rollback();
+    test_repeated_eviction_invariants();
     std::cout << "[TEST] Starting Realistic End-to-End AMU-QUANT Pipeline Verification..." << std::endl;
 
     AMUQuantConfig cfg;

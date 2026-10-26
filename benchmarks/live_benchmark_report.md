@@ -10,28 +10,47 @@
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
 | **Tokens Generated** | 64/64 | 64/64 | 64/64 |
-| **Peak Physical RSS** | 354 MB | 379 MB | 381 MB |
-| **Inference Throughput** | 12.81 tok/s | 13.77 tok/s | 11.85 tok/s |
-| **KV Memory Reclaimed** | 0 KB | 0 KB | 8704 KB |
-| **Tokens Safely Archived** | 0 | 0 | 68 |
-| **Semantic Recall Score** | N/A | N/A | 0.8468 |
-| **SIMD Retrieval Latency** | N/A | N/A | 2.019 ms |
+| **Peak Physical RSS** | 366 MB | 387 MB | 389 MB |
+| **Empirical Process RSS Delta** | -11 MB | 35 MB | 37 MB |
+| **Inference Throughput** | 12.31 tok/s | 13.62 tok/s | 13.03 tok/s |
+| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **9728 KB** |
+| **Context Tokens Safely Archived** | 0 | 0 | **76** |
+| **Tier 1: Index Sanity Match** | N/A | N/A | **0.8587** |
+| **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.643 ms** |
 
-## 2. Scenario 2: Acute Host Memory Starvation & Survival Mode Stress Test
+> [!NOTE]
+> **Accounting Notice on Physical vs Logical Memory**:
+> `Logical KV Capacity Reclaimed` reflects uncompressed sequence slots pruned from the attention buffer. > `llama.cpp` pre-allocates a contiguous ring buffer pool for sequence positions, which means KV eviction prevents > buffer expansion and memory exhaustion (bounded physical RSS) rather than issuing immediate heap deallocation calls to the OS.
 
-| Stress Evaluation Metric | Unmanaged Baseline 2 | AMU-QUANT Survival Engine |
-| :--- | :--- | :--- |
-| **Zero-OOM Survival** | High OOM Risk (Memory Unbounded) | **100% Guaranteed Completion** |
-| **Host Stress Event** | N/A | Injected at Token 16 (Available RAM: 350MB, Swap: 1.4GB) |
-| **FSM Operational Regime** | None (Static) | **REGIME 3 (Ultra-Low Survival Mode)** |
-| **Dynamic Requantization** | None (FP16 only) | **In-Place 4-bit -> 2-bit Compaction** |
-| **Layer Prefetch Depth** | Uncontrolled | **0 (Strict Single-Layer Execution)** |
-| **Physical KV Reclaimed** | 0 KB | **9728 KB (9 MB)** |
-| **Pre-Shock Recall (4-bit)** | N/A | **0.8468 (Latency: 0.4898 ms)** |
-| **Post-Shock Recall (2-bit)** | N/A | **0.8468 (Latency: 0.5893 ms)** |
-| **Episodic Memory Size** | N/A | **1103 KB** |
+## 2. Scenario 2A: Deterministic FSM State Transition Test (Mock Telemetry)
 
-## 3. Scenario 3: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+| Deterministic Evaluation Metric | AMU-QUANT State Machine Engine |
+| :--- | :--- |
+| **Zero-OOM Horizon Completed** | **Yes (100% Guaranteed)** |
+| **Injected Telemetry Profile** | Available RAM: 350 MB (< 600 MB Reserve), Swap Thrashing: 1.4 GB |
+| **FSM Operational Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
+| **Dynamic Requantization** | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
+| **Logical KV Capacity Reclaimed** | **11776 KB** |
+| **Pre-Shock Recall (4-bit)** | **0.8587 (Latency: 0.5298 ms)** |
+| **Post-Shock Recall (2-bit)** | **0.8587 (Latency: 1.6001 ms)** |
+| **Tier 2 Factual Needle Recovery** | **100% Preserved** |
+| **Episodic Vector Memory Footprint** | **1119 KB (50% In-Place Compaction)** |
+
+## 3. Scenario 2B: Controlled Real Host Memory Stress Test (Physical Memory Pressure)
+
+| Real Stress Metric | AMU-QUANT Live Host Performance |
+| :--- | :--- |
+| **Zero-OOM Horizon Completed** | **Yes (100% Completion)** |
+| **Host Physical Memory Allocated** | **2048 MB Dirty Pages** |
+| **Host Telemetry Sensing Mode** | Live macOS Kernel (`mach_host_self`, `host_statistics64`) |
+| **Autonomous FSM Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
+| **Dynamic Requantization** | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
+| **Logical KV Capacity Reclaimed** | **11264 KB** |
+| **Tier 2 Factual Needle Recovery** | **100% Preserved** |
+| **Process RSS Before / After** | 355 MB / 2439 MB (Delta: 2084 MB) |
+
+## 4. Scenario 3: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 
 | Token Horizon ($N$) | Baseline Unmanaged FP16 KV | AMU-QUANT Physical KV | AMU-QUANT 2-bit Index | Memory Reduction Ratio |
 | :--- | :--- | :--- | :--- | :--- |

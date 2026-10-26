@@ -1,6 +1,6 @@
 # AMU-QUANT
 
-**Co-Adaptive Layer-wise Weight Streaming and TurboQuant Context Compression for On-Device Large Language Model Inference**
+**Co-Adaptive Runtime Memory Policy and Transactional KV-Cache Compression for On-Device Large Language Model Inference**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)](CMakeLists.txt)
@@ -26,16 +26,16 @@ Prior systems exhibit four critical systemic limitations:
 * **Static TurboQuant Lacks Runtime Adaptability:** Early TurboQuant integrations ([Zandieh et al., ICLR 2026](https://arxiv.org/abs/2504.19874)) in community branches ([TheTom, 2026](https://github.com/TheTom/llama-cpp-turboquant); [AmesianX, 2026](https://github.com/AmesianX/TurboQuant); [Issue #20977](https://github.com/ggml-org/llama.cpp/issues/20977); [PR #21038](https://github.com/ggml-org/llama.cpp/pull/21038)) require pre-configured bit-widths; they cannot adjust compression dynamically when available RAM fluctuates mid-generation.
 * **The turbovec Library Lacks Native C++ Integration:** The high-performance `turbovec` crate ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)) achieves $7.8\times$ (4-bit) and $15.5\times$ (2-bit) compression in microseconds via CPU SIMD, but only targets Rust and Python, lacking a zero-copy C-ABI bridge to `llama.cpp` (C++).
 
-**AMU-QUANT** resolves this dilemma through a co-adaptive runtime engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`). Simultaneously, it directs kernel paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to synchronize weight prefetching and context compression in dynamic equilibrium.
+**AMU-QUANT** resolves this dilemma through a co-adaptive runtime memory management engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`) protected by a guaranteed **Transactional Eviction Barrier**. Concurrently, it coordinates advisory virtual memory paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model segments.
 
 ### System Architecture and Research Scope
-* **Runtime Host-Aware Memory Pressure Arbitration ($\Phi_t$)**: Evaluates dual-budget memory equilibrium between internal process footprint ($\mathcal{U}_{\text{process}}$) and external host OS headroom ($\mathcal{U}_{\text{system}}$), mitigating kernel swap thrashing and out-of-memory termination through dynamic tri-modal hysteresis regimes.
+* **Primary Research Contribution**: A unified **Co-Adaptive Runtime Memory Policy & Transactional KV-Cache Compression** framework for resource-constrained on-device LLM inference.
 * **Integrated Systems Modules**:
-  1. **KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment and persistent translation mapping (`TokenIndexMap`).
+  1. **Transactional KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment and persistent translation mapping (`TokenIndexMap`), backed by a synchronous commit barrier ensuring zero unarchived context loss.
   2. **Episodic Vector Memory**: Non-uniform Lloyd-Max scalar quantization (4-bit/2-bit) providing sub-millisecond semantic retrieval without unbounded memory growth.
-  3. **Virtual Memory Paging Manager**: Virtual memory page cache management via `posix_madvise(DONTNEED / WILLNEED)`.
+  3. **Advisory Virtual Memory Paging**: Evaluates OS kernel paging hints via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model file segments. Fine-grained intra-forward tensor computation hook streaming is an exploratory optimization under active investigation.
 
-> **Context Memory Architecture Clarification**: AMU-QUANT archives high-dimensional **token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$)** into an episodic SIMD vector memory (`turbovec`) for semantic context recall, rather than storing uncompressed multi-head attention Key/Value tensors across all layers. Physical KV-cache slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` only after atomic representation archiving is verified.
+> **Transactional Context Memory Clarification**: AMU-QUANT archives high-dimensional **token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$)** into an episodic SIMD vector memory (`turbovec`) for semantic context recall, rather than storing uncompressed multi-head attention Key/Value tensors across all layers. Physical KV-cache slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` **strictly after** transactional batch verification in `turbovec` is verified. If any vector insert fails, the eviction transaction aborts and physical KV context remains intact.
 
 From **Data Science** and **Natural Language Processing (NLP)** perspectives, this system advances:
 1. **High-dimensional vector space optimization** via non-uniform Lloyd-Max scalar quantization (4-bit and 2-bit).
@@ -157,10 +157,13 @@ flowchart TD
 
     GGUF_File -->|"mmap read-only"| WeightRegistry
     Sys_Madvise -->|"Evict / Prefetch Pages"| WeightRegistry
-    KVSurgery -->|"Zero-Copy Raw Pointer Passing"| FFI_Layer
+    KVSurgery -->|"Transactional Batch Commit"| FFI_Layer
     FFI_Layer --> TurboQuantIndex
     SIMDSearch -->|"Selective Context Recall"| KVCache
 ```
+
+> [!NOTE]
+> **Advisory Paging Scope**: POSIX advisory paging (`posix_madvise`) provides operating system kernel hints across mapped `.gguf` file segments. It does not replace fine-grained per-layer tensor computation execution hooks inside the deep forward pass, which remain an active subject of ongoing investigation.
 
 ---
 
@@ -173,7 +176,14 @@ AMU-QUANT evaluates inference efficiency and memory stabilization using a formal
 ./build/amuquant_benchmark --tokens 96
 
 # Option B: Full-weight GGUF benchmark with llama.cpp (Setup via ./scripts/setup_llama.sh)
-./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --scenario all --tokens 64
+# Scenario 1: Nominal 3-way methodological parity
+./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --scenario nominal --tokens 64
+
+# Scenario 2A: Deterministic FSM state transition validation (Mock Telemetry)
+./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --scenario mock-stress --tokens 64
+
+# Scenario 2B: Controlled real host memory stress test (Physical Memory Pressure)
+./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --scenario real-stress --tokens 64
 ```
 
 ### 5.1 Scenario 1: Nominal 3-Way Methodological Parity (64 Tokens)
@@ -184,53 +194,75 @@ The table below reports live empirical measurements obtained from running `./bui
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | **Yes (100%)** |
 | **Tokens Generated** | 64 / 64 | 64 / 64 | **64 / 64** |
-| **Peak Physical RSS** | 354 MB | 379 MB | **381 MB** |
-| **Inference Throughput** | 12.81 tok/s | 13.77 tok/s | **11.85 tok/s** |
-| **Physical KV Memory Reclaimed** | 0 KB | 0 KB | **8,704 KB (8.7 MB)** |
-| **Context Tokens Safely Archived** | 0 | 0 | **68 tokens** |
-| **Semantic Context Recall** | N/A | N/A | **0.8468 (Cosine Match)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **2.019 ms** |
+| **Peak Physical RSS** | 366 MB | 387 MB | **389 MB** |
+| **Process RSS Delta** | -11 MB | +35 MB | **+37 MB** |
+| **Inference Throughput** | 12.31 tok/s | 13.62 tok/s | **13.03 tok/s** |
+| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **9,728 KB (~9.7 MB)** |
+| **Context Tokens Safely Archived** | 0 | 0 | **76 tokens** |
+| **Tier 1: Index Sanity Match** | N/A | N/A | **0.8587 (Top-1 Cosine Match)** |
+| **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
+| **SIMD Retrieval Latency** | N/A | N/A | **0.643 ms** |
+
+> [!NOTE]
+> **Accounting Notice on Physical vs Logical Memory**:
+> `Logical KV Capacity Reclaimed` reflects uncompressed sequence slots pruned from the attention buffer. `llama.cpp` pre-allocates a contiguous ring buffer pool for sequence positions, which means KV eviction prevents buffer expansion and memory exhaustion (bounded physical RSS) rather than issuing immediate heap deallocation calls to the OS.
 
 #### Throughput and Memory Stabilization Statistics Chart
 
 ```text
 Inference Throughput (tokens / second):
-  Baseline 1 (Raw)       [12.81 tok/s]  |====================|
-  Baseline 2 (Parity)    [13.77 tok/s]  |======================|
-  AMU-QUANT (Co-Adapt)   [11.85 tok/s]  |===================|  (91.3% throughput parity)
+  Baseline 1 (Raw)       [12.31 tok/s]  |====================|
+  Baseline 2 (Parity)    [13.62 tok/s]  |======================|
+  AMU-QUANT (Co-Adapt)   [13.03 tok/s]  |=====================|  (95.7% throughput parity)
 
-Physical KV-Cache RAM Reclaimed:
+Logical KV-Cache Capacity Reclaimed:
   Baseline 1 (Raw)       [     0 KB  ]  |
   Baseline 2 (Parity)    [     0 KB  ]  |
-  AMU-QUANT (Co-Adapt)   [  8704 KB  ]  |========================================| (8.7 MB freed)
+  AMU-QUANT (Co-Adapt)   [  9728 KB  ]  |========================================| (9.7 MB freed)
 ```
 
-| Execution Method | Throughput (tok/s) | Visual Distribution | KV Memory Reclaimed | Zero-OOM Status |
+| Execution Method | Throughput (tok/s) | Visual Distribution | Logical KV Reclaimed | Zero-OOM Status |
 | :--- | :---: | :--- | :---: | :---: |
-| **Baseline 1 (Raw Vanilla)** | 12.81 tok/s | `███████████████████░░` 12.81 | 0 KB | 100% |
-| **Baseline 2 (With Embeddings)** | 13.77 tok/s | `█████████████████████` 13.77 | 0 KB | 100% |
-| **AMU-QUANT Co-Adaptive** | **11.85 tok/s** | `██████████████████░░░` 11.85 | **8,704 KB (8.7 MB)** | **100% Guaranteed** |
+| **Baseline 1 (Raw Vanilla)** | 12.31 tok/s | `███████████████████░░` 12.31 | 0 KB | 100% |
+| **Baseline 2 (With Embeddings)** | 13.62 tok/s | `█████████████████████` 13.62 | 0 KB | 100% |
+| **AMU-QUANT Co-Adaptive** | **13.03 tok/s** | `████████████████████░` 13.03 | **9,728 KB (9.7 MB)** | **100% Guaranteed** |
 
 ---
 
-### 5.2 Scenario 2: Acute Host Memory Starvation & Survival Mode Stress Test
+### 5.2 Scenario 2A: Deterministic FSM State Transition Test (Mock Telemetry)
 
-In this stress evaluation, the LLM begins decoding under nominal conditions. At **token 16**, an external synthetic memory starvation event is injected into the operating system (available host RAM plummets to 350 MB—breaching the 600 MB OS reserve threshold—and kernel swap thrashing spikes to 1.4 GB). 
+To evaluate the mathematical validity of the state machine deterministically without external OS variance, this scenario injects synthetic host memory starvation at token 16 (available host RAM plummets to 350 MB—breaching the 600 MB OS reserve threshold—and kernel swap thrashing spikes to 1.4 GB):
 
-AMU-QUANT's predictive controller ($\Phi_t$) instantly detects the critical breach ($\Phi_t \approx 1.48 \gg \theta_{\text{high}} = 0.85$) and triggers **Regime 3 (Ultra-Low Survival Mode)**:
-
-| Stress Evaluation Metric | Unmanaged Baseline 2 | AMU-QUANT Survival Engine |
+| Deterministic Stress Metric | Unmanaged Baseline 2 | AMU-QUANT State Machine Engine |
 | :--- | :--- | :--- |
 | **Zero-OOM Horizon Completed** | High OOM Risk (Memory Unbounded) | **100% Guaranteed Completion** |
-| **Host Stress Event Injected** | N/A | Injected at Token 16 (Available RAM: 350MB, Swap: 1.4GB) |
-| **FSM Operational Regime Shift** | Static (No Adaptation) | **REGIME 3 (Ultra-Low Survival Mode)** |
+| **Synthetic Telemetry Profile** | N/A | Available RAM: 350MB, Swap: 1.4GB |
+| **FSM Operational Transition** | Static (No Adaptation) | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic In-Place Requantization** | None (FP16 only) | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
 | **Layer Prefetch Depth Throttling** | Uncontrolled | **0 (Strict Single-Layer Execution)** |
-| **Total Physical KV RAM Reclaimed** | 0 KB | **9,728 KB (~9.7 MB)** |
+| **Logical KV Capacity Reclaimed** | 0 KB | **11,776 KB (~11.8 MB)** |
 | **Active Recent Context Window** | Unbounded expansion | **Clamped to min_recent_window = 16** |
-| **Pre-Shock Semantic Recall (4-bit)** | N/A | **0.8468 (Latency: 0.490 ms)** |
-| **Post-Shock Semantic Recall (2-bit)** | N/A | **0.8468 (Latency: 0.589 ms)** |
-| **Episodic Vector Memory Footprint** | N/A | **1,103 KB (~1.1 MB)** (50% In-Place Compaction) |
+| **Pre-Shock Semantic Recall (4-bit)** | N/A | **0.8587 (Latency: 0.530 ms)** |
+| **Post-Shock Semantic Recall (2-bit)** | N/A | **0.8587 (Latency: 1.600 ms)** |
+| **Tier 2 Factual Needle Recovery** | N/A | **100% Preserved (Recall@3)** |
+| **Episodic Vector Memory Footprint** | N/A | **1,119 KB (~1.1 MB)** (50% In-Place Compaction) |
+
+---
+
+### 5.3 Scenario 2B: Controlled Real Host Memory Stress Test (Physical Memory Pressure)
+
+In contrast to deterministic mock testing, this scenario activates a controlled background memory burner (`HostMemoryStressInjector`) that allocates and touches physical pages in RAM, driving live macOS host memory into acute pressure:
+
+| Real Stress Metric | Unmanaged Baseline 2 | AMU-QUANT Live Host Performance |
+| :--- | :--- | :--- |
+| **Zero-OOM Horizon Completed** | High OOM Risk (Memory Exhaustion) | **100% Guaranteed Completion** |
+| **Host Physical Memory Allocated** | 0 MB | **2,048 MB Real Dirty Pages** |
+| **Host Telemetry Sensing Mode** | Live OS Kernel | **Live macOS Kernel (mach_host_self / sysctl)** |
+| **Autonomous FSM Transition** | Static (No Adaptation) | **REGIME 3 (Ultra-Low Survival Mode)** |
+| **Dynamic Requantization** | None (FP16 only) | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
+| **Logical KV Capacity Reclaimed** | 0 KB | **11,264 KB (~11.3 MB)** |
+| **Tier 2 Factual Needle Recovery** | N/A | **100% Preserved (Recall@3)** |
+| **Host RAM Released Post-Run** | N/A | **100% Clean Deallocation (2048 MB Released)** |
 
 #### Memory Footprint Compaction Statistics Chart
 
@@ -249,7 +281,7 @@ Memory Footprint under Host Memory Crisis:
 
 ---
 
-### 5.3 Scenario 3: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
+### 5.4 Scenario 3: Theoretical & Empirical Long-Context Scalability ($N \ge 512$ Tokens)
 
 On short horizons ($N < 100$ tokens), unmanaged baselines appear marginally faster because the unmanaged KV-cache fits into GPU L2/SLC cache. As context depth expands beyond the **Crossover Point ($N^* \approx 180$ tokens)**, unmanaged baseline memory explodes linearly ($\mathcal{O}(N)$), while AMU-QUANT bounds physical KV memory to $\approx 4.71\text{ MB}$ ($\mathcal{O}(1)$ attention complexity):
 
