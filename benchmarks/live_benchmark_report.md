@@ -10,14 +10,14 @@
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | Yes (100%) |
 | **Tokens Generated** | 64/64 | 64/64 | 64/64 |
-| **Peak Physical RSS** | 366 MB | 387 MB | 389 MB |
-| **Empirical Process RSS Delta** | -11 MB | 35 MB | 37 MB |
-| **Inference Throughput** | 12.31 tok/s | 13.62 tok/s | 13.03 tok/s |
-| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **9728 KB** |
-| **Context Tokens Safely Archived** | 0 | 0 | **76** |
-| **Tier 1: Index Sanity Match** | N/A | N/A | **0.8587** |
+| **Peak Physical RSS** | 354 MB | 386 MB | 389 MB |
+| **Empirical Process RSS Delta** | 7 MB | 35 MB | 36 MB |
+| **Inference Throughput** | 13.47 tok/s | 15.73 tok/s | 14.47 tok/s |
+| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **8704 KB** |
+| **Context Tokens Safely Archived** | 0 | 0 | **68** |
+| **Tier 1: Index Sanity Match** | N/A | N/A | **0.9759** |
 | **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **0.643 ms** |
+| **SIMD Retrieval Latency** | N/A | N/A | **1.308 ms** |
 
 > [!NOTE]
 > **Accounting Notice on Physical vs Logical Memory**:
@@ -32,8 +32,8 @@
 | **FSM Operational Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
 | **Logical KV Capacity Reclaimed** | **11776 KB** |
-| **Pre-Shock Recall (4-bit)** | **0.8587 (Latency: 0.5298 ms)** |
-| **Post-Shock Recall (2-bit)** | **0.8587 (Latency: 1.6001 ms)** |
+| **Pre-Shock Recall (4-bit)** | **0.9759 (Latency: 0.3215 ms)** |
+| **Post-Shock Recall (2-bit)** | **0.8029 (Latency: 1.7669 ms)** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
 | **Episodic Vector Memory Footprint** | **1119 KB (50% In-Place Compaction)** |
 
@@ -46,7 +46,7 @@
 | **Host Telemetry Sensing Mode** | Live macOS Kernel (`mach_host_self`, `host_statistics64`) |
 | **Autonomous FSM Transition** | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
-| **Logical KV Capacity Reclaimed** | **11264 KB** |
+| **Logical KV Capacity Reclaimed** | **9216 KB** |
 | **Tier 2 Factual Needle Recovery** | **100% Preserved** |
 | **Process RSS Before / After** | 355 MB / 2439 MB (Delta: 2084 MB) |
 

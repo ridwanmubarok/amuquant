@@ -264,14 +264,14 @@ The table below reports live empirical measurements obtained from running `./bui
 | :--- | :--- | :--- | :--- |
 | **Target Horizon Completed** | Yes (100%) | Yes (100%) | **Yes (100%)** |
 | **Tokens Generated** | 64 / 64 | 64 / 64 | **64 / 64** |
-| **Peak Physical RSS** | 366 MB | 387 MB | **389 MB** |
-| **Process RSS Delta** | -11 MB | +35 MB | **+37 MB** |
-| **Inference Throughput** | 12.31 tok/s | 13.62 tok/s | **13.03 tok/s** |
-| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **9,728 KB (~9.7 MB)** |
-| **Context Tokens Safely Archived** | 0 | 0 | **76 tokens** |
-| **Tier 1: Index Sanity Match** | N/A | N/A | **0.8587 (Top-1 Cosine Match)** |
+| **Peak Physical RSS** | 354 MB | 386 MB | **389 MB** |
+| **Process RSS Delta** | +7 MB | +35 MB | **+36 MB** |
+| **Inference Throughput** | 13.47 tok/s | 15.73 tok/s | **14.47 tok/s** |
+| **Logical KV Capacity Reclaimed** | 0 KB | 0 KB | **8,704 KB (~8.7 MB)** |
+| **Context Tokens Safely Archived** | 0 | 0 | **68 tokens** |
+| **Tier 1: Index Sanity Match** | N/A | N/A | **0.9759 (Top-1 Cosine Match)** |
 | **Tier 2: Factual Needle Recall** | N/A | N/A | **100% Match (Recall@3)** |
-| **SIMD Retrieval Latency** | N/A | N/A | **0.643 ms** |
+| **SIMD Retrieval Latency** | N/A | N/A | **1.308 ms** |
 
 > [!NOTE]
 > **Accounting Notice on Physical vs Logical Memory**:
@@ -281,21 +281,21 @@ The table below reports live empirical measurements obtained from running `./bui
 
 ```text
 Inference Throughput (tokens / second):
-  Baseline 1 (Raw)       [12.31 tok/s]  |====================|
-  Baseline 2 (Parity)    [13.62 tok/s]  |======================|
-  AMU-QUANT (Co-Adapt)   [13.03 tok/s]  |=====================|  (95.7% throughput parity)
+  Baseline 1 (Raw)       [13.47 tok/s]  |====================|
+  Baseline 2 (Parity)    [15.73 tok/s]  |=======================|
+  AMU-QUANT (Co-Adapt)   [14.47 tok/s]  |=====================|  (92.0% throughput parity)
 
 Logical KV-Cache Capacity Reclaimed:
   Baseline 1 (Raw)       [     0 KB  ]  |
   Baseline 2 (Parity)    [     0 KB  ]  |
-  AMU-QUANT (Co-Adapt)   [  9728 KB  ]  |========================================| (9.7 MB freed)
+  AMU-QUANT (Co-Adapt)   [  8704 KB  ]  |========================================| (8.7 MB freed)
 ```
 
 | Execution Method | Throughput (tok/s) | Visual Distribution | Logical KV Reclaimed | Zero-OOM Status |
 | :--- | :---: | :--- | :---: | :---: |
-| **Baseline 1 (Raw Vanilla)** | 12.31 tok/s | `███████████████████░░` 12.31 | 0 KB | 100% |
-| **Baseline 2 (With Embeddings)** | 13.62 tok/s | `█████████████████████` 13.62 | 0 KB | 100% |
-| **AMU-QUANT Co-Adaptive** | **13.03 tok/s** | `████████████████████░` 13.03 | **9,728 KB (9.7 MB)** | **100% Guaranteed** |
+| **Baseline 1 (Raw Vanilla)** | 13.47 tok/s | `███████████████████░░` 13.47 | 0 KB | 100% |
+| **Baseline 2 (With Embeddings)** | 15.73 tok/s | `█████████████████████` 15.73 | 0 KB | 100% |
+| **AMU-QUANT Co-Adaptive** | **14.47 tok/s** | `████████████████████░` 14.47 | **8,704 KB (8.7 MB)** | **100% Guaranteed** |
 
 ---
 
@@ -312,8 +312,8 @@ To evaluate the mathematical validity of the state machine deterministically wit
 | **Layer Prefetch Depth Throttling** | Uncontrolled | **0 (Strict Single-Layer Execution)** |
 | **Logical KV Capacity Reclaimed** | 0 KB | **11,776 KB (~11.8 MB)** |
 | **Active Recent Context Window** | Unbounded expansion | **Clamped to min_recent_window = 16** |
-| **Pre-Shock Semantic Recall (4-bit)** | N/A | **0.8587 (Latency: 0.530 ms)** |
-| **Post-Shock Semantic Recall (2-bit)** | N/A | **0.8587 (Latency: 1.600 ms)** |
+| **Pre-Shock Semantic Recall (4-bit)** | N/A | **0.9759 (Latency: 0.322 ms)** |
+| **Post-Shock Semantic Recall (2-bit)** | N/A | **0.8029 (Latency: 1.767 ms)** |
 | **Tier 2 Factual Needle Recovery** | N/A | **100% Preserved (Recall@3)** |
 | **Episodic Vector Memory Footprint** | N/A | **1,119 KB (~1.1 MB)** (50% In-Place Compaction) |
 
@@ -330,7 +330,7 @@ In contrast to deterministic mock testing, this scenario activates a controlled 
 | **Host Telemetry Sensing Mode** | Live OS Kernel | **Live macOS Kernel (mach_host_self / sysctl)** |
 | **Autonomous FSM Transition** | Static (No Adaptation) | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic Requantization** | None (FP16 only) | **Autonomous In-Place 4-bit -> 2-bit Compaction** |
-| **Logical KV Capacity Reclaimed** | 0 KB | **11,264 KB (~11.3 MB)** |
+| **Logical KV Capacity Reclaimed** | 0 KB | **9,216 KB (~9.2 MB)** |
 | **Tier 2 Factual Needle Recovery** | N/A | **100% Preserved (Recall@3)** |
 | **Host RAM Released Post-Run** | N/A | **100% Clean Deallocation (2048 MB Released)** |
 
