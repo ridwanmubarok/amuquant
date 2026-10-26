@@ -103,6 +103,7 @@ During extended multi-turn dialogs and multi-step reasoning, physical KV-cache m
 3. **Eviction Candidate Window ($W_{\text{middle}}$):** The tokens situated between the attention sinks and the recent window ($p \in [W_{\text{sink}}, T - W_{\text{recent}}]$).
 
 * **KV Surgery Mechanics:**
+  * **Context Representation Semantics (Episodic Hidden-State Memory):** AMU-QUANT preserves context through an **Episodic Semantic Memory Architecture**: It extracts high-dimensional normalized token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$, derived via `llama_get_embeddings_ith()`) at candidate positions before eviction. Physical multi-head attention KV slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` only after atomic archiving into `turbovec` is verified. Upon context recall queries, relevant representations are retrieved via SIMD cosine search (< 0.25 ms) and reinjected for autoregressive attention.
   * Candidate tokens are extracted as contiguous float vectors and passed directly into the `turbovec` index via raw memory pointers (*zero-copy*).
   * The sequence slot range is excised from physical KV memory using `llama_kv_cache_seq_rm(ctx, 0, p_start, p_end)`.
   * Position indices of all subsequent tokens are shifted using `llama_kv_cache_seq_add(ctx, 0, p_end, -1, delta)` to maintain mathematical continuity for Rotary Position Embedding (RoPE).
@@ -112,7 +113,7 @@ Employs an embedded, thread-safe instance of the Google Research TurboQuant algo
 
 * **Lloyd-Max Scalar Quantization:** Rotates incoming token vectors with a deterministic block-orthogonal matrix $\mathbf{Q} \in \mathbb{R}^{B \times B}$ ($B=64$) and discretizes components to precomputed Lloyd-Max codebooks (4-bit: 16 levels, 2-bit: 4 levels).
 * **SIMD-Accelerated Cosine Retrieval:** Decodes quantized vector blocks in CPU vector registers (ARM NEON or AVX2/AVX-512) to compute Top-$K$ cosine similarity queries in sub-millisecond latency (<0.25 ms).
-* **In-Place Requantization:** Under critical memory pressure (Regime 3), the index performs a direct bit-shift pass over all stored 4-bit nibbles, condensing them to 2-bit dibits in-place without reallocation.
+* **In-Place Requantization:** Under critical memory pressure (Regime 3), the index executes an optimal Lloyd-Max transformation pass ($\text{LUT}_{4\to 2}$) over all stored 4-bit nibbles, condensing them to 2-bit dibits in-place with minimal quantization distortion ($|c_i - q_j|^2$).
 
 ---
 

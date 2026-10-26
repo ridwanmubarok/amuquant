@@ -7,6 +7,8 @@
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg?logo=rust)](turbovec-ffi/Cargo.toml)
 [![CMake](https://img.shields.io/badge/CMake-3.20+-green.svg?logo=cmake)](CMakeLists.txt)
 
+> **Academic Research Prototype (Tugas Akhir / Undergraduate Thesis Framework)**: This repository provides an experimental co-adaptive inference runtime for resource-constrained commodity devices. Comparative evaluation metrics represent **Formal Research Hypotheses & Evaluation Protocols**, verifiable using the built-in reproducible benchmark suite (`live_benchmark`).
+
 ---
 
 ## 1. Abstract
@@ -25,6 +27,8 @@ Prior systems exhibit four critical systemic limitations:
 * **The turbovec Library Lacks Native C++ Integration:** The high-performance `turbovec` crate ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)) achieves $7.8\times$ (4-bit) and $15.5\times$ (2-bit) compression in microseconds via CPU SIMD, but only targets Rust and Python, lacking a zero-copy C-ABI bridge to `llama.cpp` (C++).
 
 **AMU-QUANT** resolves this dilemma through a co-adaptive runtime engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`). Simultaneously, it directs kernel paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` to synchronize weight prefetching and context compression in dynamic equilibrium.
+
+> **Context Memory Architecture Clarification**: AMU-QUANT archives high-dimensional **token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$)** into an episodic SIMD vector memory (`turbovec`) for semantic context recall, rather than storing uncompressed multi-head attention Key/Value tensors across all layers. Physical KV-cache slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` only after atomic representation archiving is verified.
 
 From **Data Science** and **Natural Language Processing (NLP)** perspectives, this system advances:
 1. **High-dimensional vector space optimization** via non-uniform Lloyd-Max scalar quantization (4-bit and 2-bit).
@@ -142,13 +146,18 @@ flowchart TD
 
 ---
 
-## 5. Comparative Evaluation
+## 5. Target Research Hypotheses & Live Benchmark Protocol
 
-Evaluation under constrained physical memory during multi-agent concurrent generation:
+The comparative metrics below represent the **Formal Research Hypotheses & Target Benchmark Protocol** designed for validation on memory-constrained hardware (e.g., macOS 8 GB / 16 GB developer devices). Researchers and evaluators can reproduce and measure live empirical telemetry directly on hardware using the built-in benchmark executable:
 
-| Quantitative Metric | Baseline 1: Standard | Baseline 2: Layer-Streaming | Baseline 3: Eviction Pruning | AMU-QUANT (Proposed) |
+```bash
+# Run live comparative empirical benchmark on local GGUF model
+./build/live_benchmark --model models/Meta-Llama-3-8B-Instruct-Q2_K.gguf --tokens 64
+```
+
+| Quantitative Metric | Baseline 1: Standard | Baseline 2: Layer-Streaming | Baseline 3: Eviction Pruning | AMU-QUANT (Hypothesis) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Survival Rate** | 0% (OOM Crash) | 100% | 100% | **100% (Zero-OOM)** |
+| **Survival Rate** | 0% (OOM Crash on long run) | 100% | 100% | **100% (Zero-OOM)** |
 | **Context Retention** | 0% (Lost on Crash) | 100% (Uncompressed) | Partial (Discarded to Trash) | **100% (Tier-2/3 Compressed)** |
 | **Needle Retrieval (Recall@1)**| 0% (Crashed) | 0% (OOM on long context) | 0% (Evicted from memory) | **~98%–99% (Top-1 SIMD Match)** |
 | **Swap Thrashing (Page Faults)**| > 1500 (Thrashing) | Elevated | 0 | **0 (Zero Thrashing)** |

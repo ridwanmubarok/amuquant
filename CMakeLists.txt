@@ -89,6 +89,29 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/include/llama.h")
         INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/build/bin"
     )
     install(TARGETS amuquant_chat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+    # Reproducible Live Empirical Benchmark (requires external/llama.cpp)
+    add_executable(live_benchmark benchmarks/live_benchmark.cpp)
+    target_include_directories(live_benchmark PRIVATE
+        include
+        external/llama.cpp/include
+        external/llama.cpp/ggml/include
+    )
+    target_link_directories(live_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/build/bin
+    )
+    target_link_libraries(live_benchmark PRIVATE
+        amuquant_core
+        llama
+        ggml
+        ggml-base
+        ggml-cpu
+    )
+    set_target_properties(live_benchmark PROPERTIES
+        BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/build/bin"
+        INSTALL_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/build/bin"
+    )
+    install(TARGETS live_benchmark RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 # Unit Tests Suite
