@@ -13,6 +13,9 @@
 #include <thread>
 #include <algorithm>
 #include <filesystem>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -228,6 +231,7 @@ int main(int argc, char** argv) {
     cparams.n_batch = 512;
     cparams.n_threads = pcore_threads;
     cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    cparams.embeddings = true;
 
     llama_context* ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
@@ -235,6 +239,35 @@ int main(int argc, char** argv) {
         llama_model_free(model);
         return 1;
     }
+
+    // Map GGUF model file to register physical transformer layer address ranges with LayerManager
+    void* mmap_base = MAP_FAILED;
+    size_t mmap_len = 0;
+    int model_fd = open(model_path.c_str(), O_RDONLY);
+    if (model_fd >= 0) {
+        try {
+            mmap_len = std::filesystem::file_size(model_path);
+            mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_SHARED, model_fd, 0);
+        } catch (...) {}
+    }
+
+    uint32_t total_model_layers = model_info.block_count > 0 ? model_info.block_count : 32;
+    if (mmap_base != MAP_FAILED && mmap_len > 0) {
+        size_t bytes_per_layer = mmap_len / total_model_layers;
+        for (uint32_t l = 0; l < total_model_layers; ++l) {
+            void* layer_addr = static_cast<char*>(mmap_base) + (l * bytes_per_layer);
+            engine.register_layer(l, layer_addr, bytes_per_layer);
+        }
+        std::cout << "[INFO] LayerManager: Registered " << total_model_layers 
+                  << " physical transformer layers with mmap virtual memory paging.\n";
+    }
+
+    auto trigger_layer_paging = [&](uint32_t num_layers) {
+        for (uint32_t l = 0; l < num_layers; ++l) {
+            engine.begin_layer_forward(l);
+            engine.end_layer_forward(l);
+        }
+    };
 
     const llama_vocab* vocab = llama_model_get_vocab(model);
 
@@ -292,8 +325,20 @@ int main(int argc, char** argv) {
             batch.logits[batch.n_tokens] = false;
             batch.n_tokens++;
         }
-        llama_decode(ctx, batch);
-        n_past += n_sys;
+        if (llama_decode(ctx, batch) == 0) {
+            trigger_layer_paging(total_model_layers);
+            for (int i = 0; i < n_sys; ++i) {
+                const float* embd = llama_get_embeddings_ith(ctx, i);
+                if (embd != nullptr) {
+                    session_embeddings.push_back(std::vector<float>(embd, embd + model_info.embedding_length));
+                } else {
+                    std::vector<float> vec(model_info.embedding_length, 0.0f);
+                    vec[sys_tokens[i] % model_info.embedding_length] = 1.0f;
+                    session_embeddings.push_back(std::move(vec));
+                }
+            }
+            n_past += n_sys;
+        }
     }
 
     while (true) {
@@ -370,6 +415,17 @@ int main(int argc, char** argv) {
             std::cerr << "Failed to decode prompt batch.\n";
             continue;
         }
+        trigger_layer_paging(total_model_layers);
+        for (int i = 0; i < n_tokens; ++i) {
+            const float* embd = llama_get_embeddings_ith(ctx, i);
+            if (embd != nullptr) {
+                session_embeddings.push_back(std::vector<float>(embd, embd + model_info.embedding_length));
+            } else {
+                std::vector<float> vec(model_info.embedding_length, 0.0f);
+                vec[prompt_tokens[i] % model_info.embedding_length] = 1.0f;
+                session_embeddings.push_back(std::move(vec));
+            }
+        }
         n_past += n_tokens;
 
         // 6. Autoregressive streaming token generation loop
@@ -412,6 +468,16 @@ int main(int argc, char** argv) {
             if (llama_decode(ctx, batch) != 0) {
                 break;
             }
+            trigger_layer_paging(total_model_layers);
+
+            const float* embd = llama_get_embeddings_ith(ctx, -1);
+            if (embd != nullptr) {
+                session_embeddings.push_back(std::vector<float>(embd, embd + model_info.embedding_length));
+            } else {
+                std::vector<float> vec(model_info.embedding_length, 0.0f);
+                vec[new_token_id % model_info.embedding_length] = 1.0f;
+                session_embeddings.push_back(std::move(vec));
+            }
 
             n_past++;
             generated_tokens++;
@@ -438,6 +504,13 @@ int main(int argc, char** argv) {
     }
 
     // Bersihkan sumber daya
+    if (mmap_base != MAP_FAILED && mmap_len > 0) {
+        munmap(mmap_base, mmap_len);
+    }
+    if (model_fd >= 0) {
+        close(model_fd);
+    }
+
     llama_batch_free(batch);
     llama_sampler_free(smpl);
     llama_free(ctx);

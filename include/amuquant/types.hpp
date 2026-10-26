@@ -51,9 +51,10 @@ struct AMUQuantConfig {
     uint64_t memory_limit_bytes{14ULL * 1024ULL * 1024ULL * 1024ULL}; // Target working budget
     uint64_t os_reserved_bytes{2ULL * 1024ULL * 1024ULL * 1024ULL};   // Reserved for OS kernel stability
     
-    // Predictive pressure score weights: Phi_t = alpha * M_curr + beta * tau * dM/dt
-    double alpha{0.65};
-    double beta{0.35};
+    // Predictive pressure score weights: Phi_t = alpha * max(U_proc, U_sys) + beta * P_growth + gamma * P_swap
+    double alpha{0.60};
+    double beta{0.25};
+    double gamma{0.15};
     double tau_horizon_sec{2.0};
     
     // Regime transition thresholds with hysteresis band

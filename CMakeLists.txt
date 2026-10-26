@@ -21,6 +21,19 @@ endif()
 # Header Include Directories
 include_directories(include)
 
+# Optional Cargo Integration for turbovec-ffi Rust Crate
+find_program(CARGO_BIN cargo)
+if(CARGO_BIN)
+    message(STATUS "Found Cargo: ${CARGO_BIN}. Enabled turbovec-ffi Rust build target.")
+    add_custom_target(turbovec_ffi_rust ALL
+        COMMAND ${CARGO_BIN} build --release --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi/Cargo.toml
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi
+        COMMENT "Building turbovec-ffi Rust crate via Cargo"
+    )
+else()
+    message(STATUS "Cargo not detected. Utilizing native C++ SIMD Lloyd-Max engine backend.")
+endif()
+
 # AMU-QUANT Core Library
 set(AMUQUANT_SOURCES
     src/telemetry.cpp

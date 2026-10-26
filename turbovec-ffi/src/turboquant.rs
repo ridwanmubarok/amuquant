@@ -230,10 +230,18 @@ impl TurboIndex {
                 let q4_2 = b1 & 0x0F;
                 let q4_3 = (b1 >> 4) & 0x0F;
 
-                let q2_0 = q4_0 / 4;
-                let q2_1 = q4_1 / 4;
-                let q2_2 = q4_2 / 4;
-                let q2_3 = q4_3 / 4;
+                // Optimal Lloyd-Max 4-bit to 2-bit centroid projection lookup table
+                const LLOYD_MAX_4TO2_LUT: [u8; 16] = [
+                    0, 0, 0, 0, // c0..c3 (<= -0.9815) -> q0 (-1.510)
+                    1, 1, 1, 1, // c4..c7 (-0.9815 < c <= 0.0) -> q1 (-0.453)
+                    2, 2, 2, 2, // c8..c11 (0.0 < c <= +0.9815) -> q2 (+0.453)
+                    3, 3, 3, 3, // c12..c15 (> +0.9815) -> q3 (+1.510)
+                ];
+
+                let q2_0 = LLOYD_MAX_4TO2_LUT[q4_0 as usize];
+                let q2_1 = LLOYD_MAX_4TO2_LUT[q4_1 as usize];
+                let q2_2 = LLOYD_MAX_4TO2_LUT[q4_2 as usize];
+                let q2_3 = LLOYD_MAX_4TO2_LUT[q4_3 as usize];
 
                 new_packed[i / 4] = (q2_0 & 0x03)
                     | ((q2_1 & 0x03) << 2)

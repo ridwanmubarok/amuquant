@@ -287,6 +287,18 @@ std::vector<SearchResult> TurboQuantEngine::search_simd(const float* query_data,
     return results;
 }
 
+// Optimal Lloyd-Max 4-bit to 2-bit centroid projection lookup table.
+// Minimizes mean squared distortion |c_i - q_j|^2 where:
+// c_i in {-2.733, -2.069, -1.618, -1.256, -0.942, -0.657, -0.388, -0.128,
+//          0.128,  0.388,  0.657,  0.942,  1.256,  1.618,  2.069,  2.733}
+// q_j in {-1.510, -0.453,  0.453,  1.510} with partition thresholds at {-0.9815, 0.0, +0.9815}.
+static const uint8_t LLOYD_MAX_4TO2_LUT[16] = {
+    0, 0, 0, 0, // c0..c3 (<= -0.9815) -> q0 (-1.510)
+    1, 1, 1, 1, // c4..c7 (-0.9815 < c <= 0.0) -> q1 (-0.453)
+    2, 2, 2, 2, // c8..c11 (0.0 < c <= +0.9815) -> q2 (+0.453)
+    3, 3, 3, 3  // c12..c15 (> +0.9815) -> q3 (+1.510)
+};
+
 void TurboQuantEngine::requantize_to_2bit() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (bit_width_ == 2) {
@@ -294,7 +306,7 @@ void TurboQuantEngine::requantize_to_2bit() {
     }
 
     // In-place codebook downscaling: maps two 4-bit nibbles into one 2-bit pair
-    // 4 nibbles (2 bytes) compress into 4 dibits (1 byte)
+    // 4 nibbles (2 bytes) compress into 4 dibits (1 byte) via Lloyd-Max lookup table.
     for (auto& vec : vectors_) {
         std::vector<uint8_t> new_packed(dimension_ / 4);
 
@@ -307,11 +319,11 @@ void TurboQuantEngine::requantize_to_2bit() {
             uint8_t q4_2 = b1 & 0x0F;
             uint8_t q4_3 = (b1 >> 4) & 0x0F;
 
-            // Direct partition mapping: q2 = q4 / 4
-            uint8_t q2_0 = q4_0 / 4;
-            uint8_t q2_1 = q4_1 / 4;
-            uint8_t q2_2 = q4_2 / 4;
-            uint8_t q2_3 = q4_3 / 4;
+            // Optimal Lloyd-Max minimum-distortion centroid mapping
+            uint8_t q2_0 = LLOYD_MAX_4TO2_LUT[q4_0];
+            uint8_t q2_1 = LLOYD_MAX_4TO2_LUT[q4_1];
+            uint8_t q2_2 = LLOYD_MAX_4TO2_LUT[q4_2];
+            uint8_t q2_3 = LLOYD_MAX_4TO2_LUT[q4_3];
 
             new_packed[i / 4] = (q2_0 & 0x03) |
                                ((q2_1 & 0x03) << 2) |

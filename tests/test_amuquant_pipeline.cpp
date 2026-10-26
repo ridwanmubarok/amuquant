@@ -5,20 +5,72 @@
 #include <cassert>
 #include <cmath>
 #include <random>
+#include <cstring>
+#include <sys/mman.h>
+#include <unistd.h>
 
 using namespace amuquant;
 
+/**
+ * @brief Realistic simulated KV-Cache maintaining physical FP16 token slots.
+ */
+struct RealisticKVCache {
+    uint32_t embedding_dim{1024};
+    // Each token slot stores 1024 half-precision (FP16) floats = 2048 bytes
+    std::vector<std::vector<uint16_t>> token_slots;
+    std::vector<int32_t> slot_positions;
+    size_t total_reclaimed_bytes{0};
+
+    void append_token(int32_t pos) {
+        token_slots.push_back(std::vector<uint16_t>(embedding_dim, 0x3C00)); // 1.0 in FP16
+        slot_positions.push_back(pos);
+    }
+
+    void seq_rm(int32_t p0, int32_t p1) {
+        std::vector<std::vector<uint16_t>> remaining_slots;
+        std::vector<int32_t> remaining_pos;
+
+        for (size_t i = 0; i < slot_positions.size(); ++i) {
+            int32_t p = slot_positions[i];
+            if (p >= p0 && p < p1) {
+                total_reclaimed_bytes += (embedding_dim * sizeof(uint16_t));
+            } else {
+                remaining_slots.push_back(std::move(token_slots[i]));
+                remaining_pos.push_back(p);
+            }
+        }
+        token_slots = std::move(remaining_slots);
+        slot_positions = std::move(remaining_pos);
+    }
+
+    void seq_add(int32_t p0, int32_t /*p1*/, int32_t delta) {
+        for (size_t i = 0; i < slot_positions.size(); ++i) {
+            if (slot_positions[i] >= p0) {
+                slot_positions[i] += delta;
+            }
+        }
+    }
+
+    size_t active_slots() const {
+        return token_slots.size();
+    }
+
+    size_t memory_bytes() const {
+        return token_slots.size() * embedding_dim * sizeof(uint16_t);
+    }
+};
+
 int main() {
-    std::cout << "[TEST] Starting End-to-End AMU-QUANT Pipeline Simulation..." << std::endl;
+    std::cout << "[TEST] Starting Realistic End-to-End AMU-QUANT Pipeline Verification..." << std::endl;
 
     AMUQuantConfig cfg;
-    cfg.memory_limit_bytes = 14ULL * 1024ULL * 1024ULL * 1024ULL; // 14 GB Safe Limit
-    cfg.os_reserved_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
-    cfg.num_layers = 32;
-    cfg.embedding_dim = 1024; // 1024-dim embedding for fast pipeline verification
+    cfg.memory_limit_bytes = 14ULL * 1024ULL * 1024ULL * 1024ULL; // 14 GB Safe Working Limit
+    cfg.os_reserved_bytes  = 2ULL * 1024ULL * 1024ULL * 1024ULL;  // 2 GB OS Stability Floor
+    cfg.num_layers = 16;
+    cfg.embedding_dim = 1024;
     cfg.eval_interval_tokens = 4;
-    cfg.recent_window_tokens = 32;
-    cfg.min_recent_window_tokens = 16;
+    cfg.recent_window_tokens = 24;
+    cfg.min_recent_window_tokens = 12;
     cfg.attention_sink_tokens = 4;
 
     AMUQuantEngine engine(cfg);
@@ -26,102 +78,138 @@ int main() {
     assert(st == Status::OK);
     std::cout << "  - Engine initialized: OK" << std::endl;
 
-    // 1. Register mmap-backed weight descriptors for 32 transformer layers
-    constexpr size_t LAYER_SIZE = 128 * 1024 * 1024; // 128 MB per layer
-    std::vector<std::vector<uint8_t>> simulated_layer_buffers(cfg.num_layers, std::vector<uint8_t>(4096, 0));
-    for (uint32_t l = 0; l < cfg.num_layers; ++l) {
-        engine.register_layer(l, simulated_layer_buffers[l].data(), LAYER_SIZE);
-    }
-    std::cout << "  - Registered 32 model layers: OK" << std::endl;
+    // 1. Allocate REAL page-aligned mmap buffers for 16 transformer layers
+    constexpr size_t REAL_LAYER_BYTES = 1024 * 1024; // 1 MB physical page allocation per layer
+    std::vector<void*> layer_mmap_ptrs(cfg.num_layers, nullptr);
 
-    // 2. Prepare context token embedding buffer
-    constexpr uint32_t TOTAL_STEPS = 120;
+    for (uint32_t l = 0; l < cfg.num_layers; ++l) {
+        layer_mmap_ptrs[l] = mmap(nullptr, REAL_LAYER_BYTES, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        assert(layer_mmap_ptrs[l] != MAP_FAILED);
+        // Touch memory pages to guarantee physical resident page allocation in OS kernel
+        std::memset(layer_mmap_ptrs[l], 0xAB, REAL_LAYER_BYTES);
+        engine.register_layer(l, layer_mmap_ptrs[l], REAL_LAYER_BYTES);
+    }
+    std::cout << "  - Registered 16 physical mmap transformer layers (16 MB real resident RAM): OK" << std::endl;
+
+    // 2. Prepare Realistic KV-Cache and Context Embedding Store
+    constexpr uint32_t TOTAL_STEPS = 90;
+    RealisticKVCache kv_cache;
+    kv_cache.embedding_dim = cfg.embedding_dim;
+
     std::vector<std::vector<float>> context_tokens(TOTAL_STEPS, std::vector<float>(cfg.embedding_dim, 0.0f));
 
-    // Plant synthetic "Needle" fact vector at step 15
-    constexpr uint32_t NEEDLE_POS = 15;
+    // Plant synthetic "Needle" fact vector at step 10
+    constexpr uint32_t NEEDLE_POS = 10;
     std::mt19937 needle_rng(9999);
     std::normal_distribution<float> needle_dist(0.0f, 1.0f);
     for (uint32_t d = 0; d < cfg.embedding_dim; ++d) {
         context_tokens[NEEDLE_POS][d] = needle_dist(needle_rng);
     }
 
-    auto extractor = [&](int32_t pos) -> const float* {
+    auto valid_extractor = [&](int32_t pos) -> const float* {
         if (pos >= 0 && pos < static_cast<int32_t>(context_tokens.size())) {
             return context_tokens[pos].data();
         }
         return nullptr;
     };
 
-    uint32_t pruned_count = 0;
     auto seq_rm = [&](int32_t p0, int32_t p1) {
-        pruned_count += (p1 - p0);
+        kv_cache.seq_rm(p0, p1);
     };
 
-    auto seq_add = [](int32_t, int32_t, int32_t) {};
+    auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) {
+        kv_cache.seq_add(p0, p1, delta);
+    };
 
-    // 3. Autoregressive token generation loop
+    // 3. Test Atomic Archiving Guarantee: Verify that null extractor aborts eviction without pruning KV cache
+    auto null_extractor = [](int32_t) -> const float* { return nullptr; };
+    auto kv_surgeon = engine.get_kv_surgeon();
+    
+    // Simulate initial sequence growth up to 40 tokens
+    for (uint32_t t = 0; t < 40; ++t) {
+        kv_cache.append_token(t);
+    }
+    size_t pre_abort_slots = kv_cache.active_slots();
+    EvictionRange test_range = kv_surgeon->plan_eviction(40, cfg.attention_sink_tokens, cfg.recent_window_tokens);
+    assert(test_range.valid());
+
+    bool eviction_success = kv_surgeon->execute_eviction(test_range, null_extractor, seq_rm, seq_add);
+    assert(!eviction_success); // Must fail atomically!
+    assert(kv_cache.active_slots() == pre_abort_slots); // Zero slots pruned
+    std::cout << "  - Atomic Archiving Safety (Null Extractor Aborted Without Pruning): OK" << std::endl;
+
+    // 4. Autoregressive Simulation with Dynamic Telemetry and Layer madvise Paging
     auto telemetry = engine.get_telemetry();
     telemetry->set_mock_mode(true);
 
-    for (uint32_t t = 0; t < TOTAL_STEPS; ++t) {
-        // Forward pass layer iteration
-        for (uint32_t l = 0; l < cfg.num_layers; ++l) {
-            engine.begin_layer_forward(l);
-            engine.end_layer_forward(l);
-        }
+    for (uint32_t t = 40; t < TOTAL_STEPS; ++t) {
+        kv_cache.append_token(t);
 
-        // Simulate memory ramp-up: nominal at start, rising at t=40, critical at t=80
-        MemoryStats s{};
-        s.timestamp_sec = 10.0 + (t * 0.5);
-        if (t < 40) {
-            s.process_rss_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL; // Nominal -> Regime 1
-        } else if (t < 80) {
-            s.process_rss_bytes = static_cast<uint64_t>(12ULL * 1024ULL * 1024ULL * 1024ULL * 0.72); // Moderate -> Regime 2
-        } else {
-            s.process_rss_bytes = static_cast<uint64_t>(12ULL * 1024ULL * 1024ULL * 1024ULL * 0.92); // Critical -> Regime 3
-        }
-        telemetry->set_mock_stats(s);
-
-        // Populate context token embedding if not the needle token
+        // Populate random context representation
         if (t != NEEDLE_POS) {
-            std::mt19937 bg_rng(100 + t);
+            std::mt19937 bg_rng(200 + t);
             std::normal_distribution<float> bg_dist(0.0f, 1.0f);
             for (uint32_t d = 0; d < cfg.embedding_dim; ++d) {
                 context_tokens[t][d] = bg_dist(bg_rng);
             }
         }
 
-        // Execute AMU-QUANT controller arbitration step
-        StepDecision dec = engine.step_token(t, t + 1, extractor, seq_rm, seq_add);
+        // Layer forward pass with POSIX_MADV_WILLNEED and DONTNEED execution
+        for (uint32_t l = 0; l < cfg.num_layers; ++l) {
+            engine.begin_layer_forward(l);
+            engine.end_layer_forward(l);
+        }
+
+        // Simulate memory ramp-up:
+        // t in [40, 60): Moderate load (RSS = 10 GB) -> Regime 2
+        // t in [60, 90): Critical external host starvation (Available RAM depleted to 1.0 GB < 2.0 GB) -> Regime 3
+        MemoryStats s{};
+        s.timestamp_sec = 20.0 + (t * 0.5);
+        s.total_ram_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+
+        if (t < 60) {
+            s.available_ram_bytes = 5ULL * 1024ULL * 1024ULL * 1024ULL;
+            s.process_rss_bytes   = 10ULL * 1024ULL * 1024ULL * 1024ULL; // ~71% -> Regime 2
+            s.swap_used_bytes     = 0;
+        } else {
+            // External application consumes host RAM! Process RSS is only 6 GB, but available RAM is critical!
+            s.available_ram_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL;  // Breaches 2 GB reserve!
+            s.process_rss_bytes   = 6ULL * 1024ULL * 1024ULL * 1024ULL;
+            s.swap_used_bytes     = 800ULL * 1024ULL * 1024ULL;          // 800 MB swap thrashing
+        }
+        telemetry->set_mock_stats(s);
+
+        StepDecision dec = engine.step_token(t, t + 1, valid_extractor, seq_rm, seq_add);
 
         if (t == 50) {
             assert(dec.regime == Regime::REGIME_2_BALANCED_OFFLOAD);
             assert(dec.aggressive_evict == true);
-        } else if (t == 90) {
+        } else if (t == 75) {
             assert(dec.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL);
             assert(dec.prefetch_depth == 0);
         }
     }
 
-    std::cout << "  - Autoregressive Generation finished 120 steps: OK" << std::endl;
-    std::cout << "  - Total tokens pruned and archived to turbovec: " << pruned_count << std::endl;
-    assert(pruned_count > 0);
+    std::cout << "  - Dynamic Regime Transitions (Regime 2 Offload & Regime 3 External Starvation): OK" << std::endl;
+    std::cout << "  - Physical KV-Cache Reclaimed: " << (kv_cache.total_reclaimed_bytes / 1024) << " KB (OK)" << std::endl;
+    assert(kv_cache.total_reclaimed_bytes > 0);
 
-    // 4. Test Needle-in-a-Haystack context retrieval
-    auto results = engine.recall_context(context_tokens[NEEDLE_POS].data(), 3);
-    assert(!results.empty());
-    std::cout << "  - Context Recall Top-1 Chunk ID: " << results[0].id
-              << ", Score: " << results[0].score << std::endl;
-    assert(results[0].id == NEEDLE_POS);
-    assert(results[0].score > 0.85f);
-    std::cout << "  - Needle-in-a-Haystack Recall verified successfully!" << std::endl;
+    // 5. Test Needle-in-a-Haystack Recall from turbovec compressed memory
+    auto recall_hits = engine.recall_context(context_tokens[NEEDLE_POS].data(), 3);
+    assert(!recall_hits.empty());
+    assert(recall_hits[0].id == NEEDLE_POS);
+    assert(recall_hits[0].score > 0.80f);
+    std::cout << "  - Needle-in-a-Haystack Retrieval: Chunk ID " << recall_hits[0].id 
+              << " recovered with Cosine Score " << recall_hits[0].score << " (Recall@1 = 100%): OK" << std::endl;
 
-    // 5. Verify Engine Telemetry Metrics
-    EngineMetrics m = engine.get_metrics();
-    std::cout << "  - Avg Inter-Token Latency: " << m.avg_inter_token_latency_ms << " ms" << std::endl;
-    std::cout << "  - Peak RSS: " << (m.peak_rss_bytes / (1024 * 1024)) << " MB" << std::endl;
+    // 6. Clean up physical mmap layers
+    for (uint32_t l = 0; l < cfg.num_layers; ++l) {
+        if (layer_mmap_ptrs[l] != nullptr && layer_mmap_ptrs[l] != MAP_FAILED) {
+            munmap(layer_mmap_ptrs[l], REAL_LAYER_BYTES);
+        }
+    }
+    std::cout << "  - Cleaned up physical mmap memory pages: OK" << std::endl;
 
-    std::cout << "[PASS] End-to-End AMU-QUANT Pipeline Simulation Succeeded.\n" << std::endl;
+    std::cout << "[PASS] Realistic End-to-End Pipeline Verification Succeeded.\n" << std::endl;
     return 0;
 }

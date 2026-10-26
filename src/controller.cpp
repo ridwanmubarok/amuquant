@@ -30,21 +30,45 @@ double AMUQuantController::compute_phi_score(
                           (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
     if (safe_limit == 0) return 0.0;
 
-    // 1. Instantaneous memory utilization ratio relative to safe budget
-    double utilization = static_cast<double>(current_stats.process_rss_bytes) / static_cast<double>(safe_limit);
+    // 1. Process memory utilization relative to process working limit
+    double util_process = static_cast<double>(current_stats.process_rss_bytes) / static_cast<double>(safe_limit);
 
-    // 2. Projected memory expansion rate over horizon window tau
+    // 2. System-wide memory utilization relative to available host capacity
+    double util_system = 0.0;
+    if (current_stats.total_ram_bytes > 0 && current_stats.available_ram_bytes > 0) {
+        if (current_stats.available_ram_bytes <= config_.os_reserved_bytes) {
+            // Available memory has breached the OS safety buffer: critical saturation
+            double deficit = static_cast<double>(config_.os_reserved_bytes - current_stats.available_ram_bytes);
+            util_system = 1.0 + (deficit / static_cast<double>(config_.os_reserved_bytes));
+        } else if (current_stats.total_ram_bytes > config_.os_reserved_bytes) {
+            uint64_t usable_ram = current_stats.total_ram_bytes - config_.os_reserved_bytes;
+            uint64_t used_system = (current_stats.total_ram_bytes > current_stats.available_ram_bytes) ?
+                                   (current_stats.total_ram_bytes - current_stats.available_ram_bytes) : 0;
+            util_system = static_cast<double>(used_system) / static_cast<double>(usable_ram);
+        }
+    }
+
+    // Base memory pressure is dominated by whichever budget is closer to exhaustion
+    double base_pressure = std::max(util_process, util_system);
+
+    // 3. Projected memory expansion velocity over lookahead horizon tau
     double dt = std::max(elapsed_sec, 0.05); // Numerical guard against near-zero delta time
     double dM_dt = delta_rss_bytes / dt;
     double projected_growth = (dM_dt * config_.tau_horizon_sec) / static_cast<double>(safe_limit);
-    
-    // Growth velocity only penalizes when positive
     projected_growth = std::max(projected_growth, 0.0);
-    // Clamp growth penalty to [0.0, 1.0] to dampen transient allocation spikes
     projected_growth = std::min(projected_growth, 1.0);
 
-    // 3. Predictive pressure metric: instantaneous baseline + growth rate penalty
-    double phi = utilization + (config_.beta * projected_growth);
+    // 4. Kernel swap thrashing penalty
+    constexpr double SWAP_SCALE_BYTES = 1024.0 * 1024.0 * 1024.0; // 1.0 GB normalizer
+    double swap_penalty = 0.0;
+    if (current_stats.swap_used_bytes > 0) {
+        swap_penalty = std::min(1.0, static_cast<double>(current_stats.swap_used_bytes) / SWAP_SCALE_BYTES);
+    }
+
+    // 5. Hybrid predictive metric: baseline pressure + differential velocity + swap penalty
+    double phi = base_pressure + 
+                 (config_.beta * projected_growth) + 
+                 (config_.gamma * swap_penalty);
     return phi;
 }
 

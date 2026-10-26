@@ -54,6 +54,9 @@ public:
     uint8_t bit_width() const { return bit_width_; }
     size_t size() const;
 
+    uint8_t quantize_scalar_4bit(float val) const;
+    uint8_t quantize_scalar_2bit(float val) const;
+
 private:
     uint32_t dimension_;
     uint8_t bit_width_;
@@ -67,14 +70,11 @@ private:
     std::vector<float> thresholds_4bit_;
     std::vector<float> centroids_2bit_;
     std::vector<float> thresholds_2bit_;
-
     std::vector<QuantizedVector> vectors_;
 
     void init_codebooks();
     void generate_orthogonal_matrix();
     void rotate_vector(const float* in, float* out) const;
-    uint8_t quantize_scalar_4bit(float val) const;
-    uint8_t quantize_scalar_2bit(float val) const;
 };
 
 } // namespace amuquant

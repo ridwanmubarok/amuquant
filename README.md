@@ -69,10 +69,15 @@ Where:
 Evaluated every $K$ tokens to anticipate allocation spikes before swapping occurs:
 
 $$
-\Phi_t = \alpha \left( \frac{M_{\text{total}}(t)}{M_{\text{limit}}} \right) + \beta \left( \frac{\widehat{\Delta M}_t}{\Delta t} \cdot \frac{\tau_{\text{horizon}}}{M_{\text{limit}}} \right)
+\Phi_t = \max\left(\mathcal{U}_{\text{process}}(t),\, \mathcal{U}_{\text{system}}(t)\right) + \beta \cdot \mathcal{P}_{\text{growth}}(t) + \gamma \cdot \mathcal{P}_{\text{swap}}(t)
 $$
 
-Where nominal parameters are calibrated to $\alpha = 0.65$, $\beta = 0.35$, and $\tau_{\text{horizon}} = 2.0\text{ s}$.
+Where:
+* **$\mathcal{U}_{\text{process}}(t) = \frac{M_{\text{process}}(t)}{M_{\text{limit}}}$**: LLM process memory saturation.
+* **$\mathcal{U}_{\text{system}}(t) = \frac{M_{\text{total}} - M_{\text{available}}(t)}{M_{\text{total}} - M_{\text{reserved}}}$**: Operating system host memory exhaustion.
+* **$\mathcal{P}_{\text{growth}}(t) = \min\left(1.0, \max\left(0.0, \frac{1}{M_{\text{limit}}} \frac{\Delta M_{\text{process}}}{\Delta t} \tau_{\text{horizon}}\right)\right)$**: Differential growth rate penalty.
+* **$\mathcal{P}_{\text{swap}}(t) = \min\left(1.0, \frac{M_{\text{swap}}(t)}{1.0\text{ GB}}\right)$**: OS kernel swap thrashing penalty.
+* Nominal parameters: $\beta = 0.25$, $\gamma = 0.15$, and $\tau_{\text{horizon}} = 2.0\text{ s}$.
 
 ### 3.3 Tri-Modal Operational Regimes
 

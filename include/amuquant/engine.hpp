@@ -72,6 +72,7 @@ public:
     TurbovecIndexHandle* get_turbovec_handle() { return turbovec_handle_; }
     std::shared_ptr<SystemTelemetry> get_telemetry() { return telemetry_; }
     std::shared_ptr<LayerManager> get_layer_manager() { return layer_mgr_; }
+    std::shared_ptr<KVSurgeon> get_kv_surgeon() { return kv_surgeon_; }
     std::shared_ptr<AMUQuantController> get_controller() { return controller_; }
 
 private:

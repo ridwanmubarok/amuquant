@@ -1,6 +1,7 @@
 #include "amuquant/kv_surgeon.hpp"
 
 #include <algorithm>
+#include <vector>
 
 namespace amuquant {
 
@@ -31,21 +32,33 @@ bool KVSurgeon::execute_eviction(
         return false;
     }
 
-    // 1. Extract middle-token representations into TurboQuant index
+    // 1. Atomic verification: Extract and verify all vectors in the candidate range
+    // If ANY vector cannot be extracted, abort eviction immediately to prevent unarchived context loss.
+    std::vector<const float*> extracted_vecs;
+    extracted_vecs.reserve(range.p_end - range.p_start);
+
     for (int32_t pos = range.p_start; pos < range.p_end; ++pos) {
-        const float* vec_ptr = extractor(pos);
-        if (vec_ptr != nullptr) {
-            turbovec_insert_zero_copy(turbovec_idx_, static_cast<uint64_t>(pos), vec_ptr, embedding_dim_);
-            total_archived_tokens_++;
+        const float* vec_ptr = extractor ? extractor(pos) : nullptr;
+        if (vec_ptr == nullptr) {
+            // Abort eviction: do not prune physical KV-cache without vector representations
+            return false;
         }
+        extracted_vecs.push_back(vec_ptr);
     }
 
-    // 2. Prune physical KV sequence slot range
+    // 2. Insert verified representations into TurboQuant vector index
+    for (size_t i = 0; i < extracted_vecs.size(); ++i) {
+        uint64_t token_id = static_cast<uint64_t>(range.p_start + static_cast<int32_t>(i));
+        turbovec_insert_zero_copy(turbovec_idx_, token_id, extracted_vecs[i], embedding_dim_);
+        total_archived_tokens_++;
+    }
+
+    // 3. Prune physical KV sequence slot range only after guaranteed archiving
     if (seq_rm) {
         seq_rm(range.p_start, range.p_end);
     }
 
-    // 3. Apply RoPE positional shift to close the sequence gap
+    // 4. Apply RoPE positional shift to close the sequence gap
     int32_t shift_delta = -(range.p_end - range.p_start);
     if (seq_add) {
         seq_add(range.p_end, -1, shift_delta);

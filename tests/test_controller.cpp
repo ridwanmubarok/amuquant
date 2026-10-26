@@ -98,6 +98,20 @@ int main() {
     assert(d5.regime == Regime::REGIME_2_BALANCED_OFFLOAD);
     std::cout << "  - Memory Relieved below threshold -> Returned to Regime 2: OK" << std::endl;
 
+    // 6. External Host Memory Starvation (Process RSS is low, but available host RAM depleted by other apps)
+    controller.reset();
+    MemoryStats s6{};
+    s6.timestamp_sec = 80.0;
+    s6.total_ram_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+    s6.available_ram_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL; // Breaches 2 GB os_reserved_bytes!
+    s6.process_rss_bytes = 3ULL * 1024ULL * 1024ULL * 1024ULL;   // Process itself uses only 3 GB
+    s6.swap_used_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL;     // 1 GB swap thrashing
+    telemetry->set_mock_stats(s6);
+
+    auto d6 = controller.on_token_step(5, 750, extractor, seq_rm, seq_add);
+    assert(d6.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL);
+    std::cout << "  - External Host Starvation (Low Process RSS, Exhausted System RAM) -> Triggered Regime 3: OK" << std::endl;
+
     turbovec_free(handle);
     std::cout << "[PASS] AMUQuantController & State Machine Validation Succeeded.\n" << std::endl;
     return 0;

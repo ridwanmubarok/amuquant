@@ -6,6 +6,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <random>
 
 using namespace amuquant;
 
@@ -75,7 +76,52 @@ int main() {
     assert(out_ids[0] == TARGET_QUERY_IDX);
     std::cout << "  - Top-1 Match after 2-bit Requantization: " << out_ids[0] << " (Score: " << out_scores[0] << ") (OK)" << std::endl;
 
-    // 7. Release index memory
+    // 7. Quantitative Lloyd-Max Distortion Verification
+    // Verify Mean Squared Error (MSE) on standard normal distribution against theoretical limits:
+    // Theoretical Lloyd-Max 4-bit MSE on N(0, 1) is ~0.0095; 2-bit MSE is ~0.1175.
+    TurboQuantEngine tq_eval(DIM, 4);
+    std::mt19937 eval_rng(12345);
+    std::normal_distribution<float> norm_dist(0.0f, 1.0f);
+    constexpr size_t NUM_SAMPLES = 10000;
+    double sum_sq_err_4bit = 0.0;
+    double sum_sq_err_2bit = 0.0;
+
+    const float centroids_4bit[16] = {
+        -2.733f, -2.069f, -1.618f, -1.256f,
+        -0.942f, -0.657f, -0.388f, -0.128f,
+         0.128f,  0.388f,  0.657f,  0.942f,
+         1.256f,  1.618f,  2.069f,  2.733f
+    };
+    const float centroids_2bit[4] = {
+        -1.510f, -0.453f, 0.453f, 1.510f
+    };
+    const uint8_t lut_4to2[16] = {
+        0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3
+    };
+
+    for (size_t i = 0; i < NUM_SAMPLES; ++i) {
+        float x = norm_dist(eval_rng);
+        uint8_t q4 = tq_eval.quantize_scalar_4bit(x);
+        float x_hat_4bit = centroids_4bit[q4];
+        double err4 = static_cast<double>(x - x_hat_4bit);
+        sum_sq_err_4bit += err4 * err4;
+
+        // Requantize to 2-bit via Lloyd-Max lookup table
+        uint8_t q2 = lut_4to2[q4];
+        float x_hat_2bit = centroids_2bit[q2];
+        double err2 = static_cast<double>(x - x_hat_2bit);
+        sum_sq_err_2bit += err2 * err2;
+    }
+
+    double mse_4bit = sum_sq_err_4bit / static_cast<double>(NUM_SAMPLES);
+    double mse_2bit = sum_sq_err_2bit / static_cast<double>(NUM_SAMPLES);
+
+    std::cout << "  - Lloyd-Max 4-bit Empirical MSE: " << mse_4bit << " (Target < 0.035): OK" << std::endl;
+    std::cout << "  - Lloyd-Max 2-bit Empirical MSE: " << mse_2bit << " (Target < 0.200): OK" << std::endl;
+    assert(mse_4bit < 0.035);
+    assert(mse_2bit < 0.200);
+
+    // 8. Release index memory
     st = turbovec_free(handle);
     assert(st == TURBOVEC_STATUS_OK);
     std::cout << "  - turbovec_free: OK" << std::endl;

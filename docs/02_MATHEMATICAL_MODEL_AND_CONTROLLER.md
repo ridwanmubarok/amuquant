@@ -29,19 +29,21 @@ $$\underbrace{M_{\text{ext}}(t)}_{\text{OS Kernel and External Apps}} + \underbr
 
 ## 2. Predictive Memory Pressure Metric ($\Phi_t$)
 
-To prevent delayed control reactions that would otherwise trigger termination by the OS kernel OOM Killer, AMU-QUANT formulates a **Predictive Memory Pressure Metric ($\Phi_t$)** evaluated every $K$ tokens. It integrates instantaneous memory saturation with the differential growth velocity:
+To prevent delayed control reactions that would otherwise trigger termination by the OS kernel OOM Killer, AMU-QUANT formulates a **Hybrid Predictive Memory Pressure Metric ($\Phi_t$)** evaluated every $K$ tokens. It integrates internal process memory utilization with host system available RAM capacity and swap thrashing:
 
-$$\Phi_t = \alpha \cdot \mathcal{U}_{\text{static}}(t) + \beta \cdot \mathcal{P}_{\text{dynamic}}(t)$$
+$$\Phi_t = \max\left(\mathcal{U}_{\text{process}}(t),\, \mathcal{U}_{\text{system}}(t)\right) + \beta \cdot \mathcal{P}_{\text{growth}}(t) + \gamma \cdot \mathcal{P}_{\text{swap}}(t)$$
 
 Where:
-* **Instantaneous Saturation Ratio**:
-  $$\mathcal{U}_{\text{static}}(t) = \frac{M_{\text{process}}(t)}{M_{\text{limit}}}$$
+* **Process Saturation Ratio**:
+  $$\mathcal{U}_{\text{process}}(t) = \frac{M_{\text{process}}(t)}{M_{\text{limit}}}$$
+* **System Saturation Ratio**:
+  $$\mathcal{U}_{\text{system}}(t) = \frac{M_{\text{total}} - M_{\text{available}}(t)}{M_{\text{total}} - M_{\text{reserved}}}$$
 * **Projected Differential Growth Penalty**:
-  $$\mathcal{P}_{\text{dynamic}}(t) = \min\left(1.0, \max\left(0.0, \frac{1}{M_{\text{limit}}} \frac{\Delta M}{\Delta t} \tau_{\text{horizon}}\right)\right)$$
-  With:
-  $$\frac{\Delta M}{\Delta t} = \frac{M_{\text{process}}(t) - M_{\text{process}}(t - K)}{\Delta t_{\text{elapsed}}}$$
+  $$\mathcal{P}_{\text{growth}}(t) = \min\left(1.0, \max\left(0.0, \frac{1}{M_{\text{limit}}} \frac{\Delta M_{\text{process}}}{\Delta t} \tau_{\text{horizon}}\right)\right)$$
+* **Kernel Swap Thrashing Penalty**:
+  $$\mathcal{P}_{\text{swap}}(t) = \min\left(1.0, \frac{M_{\text{swap}}(t)}{1.0\text{ GB}}\right)$$
 * **Lookahead Time Horizon**: $\tau_{\text{horizon}} = 2.0\text{ seconds}$.
-* **Nominal Calibration Weights**: $\alpha = 0.65$ and $\beta = 0.35$ ($\alpha + \beta = 1.0$).
+* **Nominal Calibration Weights**: $\beta = 0.25$ and $\gamma = 0.15$.
 
 ---
 
