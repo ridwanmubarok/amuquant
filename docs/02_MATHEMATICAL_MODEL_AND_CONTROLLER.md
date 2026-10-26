@@ -8,21 +8,21 @@ This document presents the mathematical formalization of the dual-budget memory 
 
 On resource-constrained host machines with a safe physical RAM ceiling $M_{\text{limit}}$, total physical memory allocation (*Resident Set Size* / RSS) at autoregressive generation step $t$ is modeled by the following equilibrium inequality:
 
-$$\underbrace{M_{\text{ext}}(t)}_{\text{OS Kernel & External Apps}} + \underbrace{\sum_{l \in \mathcal{L}_{\text{resident}}(t)} M_{\text{weight}}(l)}_{\text{Resident Weight Pages in RAM}} + \underbrace{M_{\text{KV}}(W_t)}_{\text{Active KV-Cache in llama.cpp}} + \underbrace{M_{\text{turbovec}}(C_t, b_t)}_{\text{Compressed Vector Index}} \le M_{\text{limit}}$$
+$$\underbrace{M_{\text{ext}}(t)}_{\text{OS Kernel and External Apps}} + \underbrace{\sum_{l \in \mathcal{L}_{\text{resident}}(t)} M_{\text{weight}}(l)}_{\text{Resident Weight Pages in RAM}} + \underbrace{M_{\text{KV}}(W_t)}_{\text{Active KV-Cache in llama.cpp}} + \underbrace{M_{\text{turbovec}}(C_t, b_t)}_{\text{Compressed Vector Index}} \le M_{\text{limit}}$$
 
 ### Variable Definitions:
-* **$M_{\text{limit}}$**: The safe physical RAM ceiling allocated for the process, parameterized as:
-  $$M_{\text{limit}} = M_{\text{total\_RAM}} - M_{\text{OS\_reserved}}$$
+* **$M_{\text{limit}}$**: Safe physical RAM ceiling allocated for the process:
+  $$M_{\text{limit}} = M_{\text{RAM}} - M_{\text{reserved}}$$
   (For example, on a 16 GB host, $M_{\text{limit}} \approx 14.0\text{ GB}$ with $2.0\text{ GB}$ reserved for OS stability; on an 8 GB host, $M_{\text{limit}} \approx 6.8\text{ GB}$ with $1.2\text{ GB}$ reserved).
 * **$M_{\text{ext}}(t)$**: Physical memory consumed by external system processes (e.g. browser, code editor, background daemons).
 * **$\mathcal{L}_{\text{resident}}(t) \subseteq \{0, 1, \dots, L-1\}$**: The set of transformer layer indices whose weight pages currently reside in physical RAM via `mmap()`.
 * **$M_{\text{weight}}(l)$**: Memory footprint of a single transformer layer $l$:
-  $$M_{\text{weight}}(l) \approx \frac{\text{Total Model Weight File Size}}{L}$$
+  $$M_{\text{weight}}(l) \approx \frac{M_{\text{model}}}{L}$$
 * **$W_t$**: The count of active tokens currently held in physical FP16 KV-cache memory in `llama.cpp` at step $t$:
-  $$M_{\text{KV}}(W_t) = 2 \times L \times n_{\text{kv\_heads}} \times d_{\text{head}} \times \text{sizeof(uint16\_t)} \times W_t$$
+  $$M_{\text{KV}}(W_t) = 2 \times L \times n_{\text{kv}} \times d_{\text{head}} \times 2 \times W_t$$
 * **$C_t$**: The count of historical token representations excised from the physical KV-cache and archived into `turbovec`.
 * **$b_t \in \{4, 2\}$**: Current bit-width precision of the `turbovec` index at step $t$:
-  $$M_{\text{turbovec}}(C_t, b_t) = C_t \times \left( \frac{b_t \cdot d}{8} + \text{Header Overhead} \right)$$
+  $$M_{\text{turbovec}}(C_t, b_t) = C_t \times \left( \frac{b_t \cdot d}{8} + S_{\text{overhead}} \right)$$
   Yielding approximately $7.8\times$ compression in 4-bit mode and $15.5\times$ compression in 2-bit mode compared to standard FP16.
 
 ---
