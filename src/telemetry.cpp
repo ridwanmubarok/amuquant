@@ -39,8 +39,14 @@ MemoryStats SystemTelemetry::sample() {
         return mock_stats_;
     }
 
+    double now = get_time_seconds();
+    if (cached_stats_.total_ram_bytes > 0 && (now - last_sample_time_) < 0.05) {
+        cached_stats_.timestamp_sec = now;
+        return cached_stats_;
+    }
+
     MemoryStats stats{};
-    stats.timestamp_sec = get_time_seconds();
+    stats.timestamp_sec = now;
 
     // Process page fault metrics via getrusage
     struct rusage usage{};
@@ -128,6 +134,8 @@ MemoryStats SystemTelemetry::sample() {
     }
 #endif
 
+    cached_stats_ = stats;
+    last_sample_time_ = now;
     return stats;
 }
 

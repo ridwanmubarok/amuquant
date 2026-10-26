@@ -188,6 +188,9 @@ void AMUQuantController::apply_regime_transition(
 
             // In-place requantization to 2-bit representation
             if (current_bit_width_ == 4 && turbovec_idx_ != nullptr) {
+                if (kv_surgeon_) {
+                    kv_surgeon_->flush_archiver();
+                }
                 turbovec_requantize_to_2bit(turbovec_idx_);
                 current_bit_width_ = 2;
                 decision.requantized_to_2bit = true;

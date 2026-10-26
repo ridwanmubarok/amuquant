@@ -356,8 +356,8 @@ int main(int argc, char** argv) {
         cfg.os_reserved_bytes  = 600ULL * 1024ULL * 1024ULL;  // OS stability headroom
         cfg.num_layers = block_count;
         cfg.embedding_dim = embedding_length;
-        cfg.eval_interval_tokens = 8; // Lightweight telemetry cadence
-        cfg.min_eviction_batch = 16;  // Batched eviction minimizing Metal GPU flushes
+        cfg.eval_interval_tokens = 8;  // Lightweight telemetry cadence
+        cfg.min_eviction_batch = 32;   // Batched eviction minimizing Metal GPU flushes
         cfg.recent_window_tokens = 32;
         cfg.min_recent_window_tokens = 16;
         cfg.attention_sink_tokens = 4;

@@ -34,6 +34,8 @@ public:
 private:
     bool mock_mode_{false};
     MemoryStats mock_stats_{};
+    double last_sample_time_{0.0};
+    MemoryStats cached_stats_{};
 };
 
 } // namespace amuquant

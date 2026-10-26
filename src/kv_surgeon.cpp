@@ -2,11 +2,122 @@
 
 #include <algorithm>
 #include <vector>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 namespace amuquant {
 
-KVSurgeon::KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim)
-    : turbovec_idx_(turbovec_idx), embedding_dim_(embedding_dim) {}
+class AsyncArchiver {
+public:
+    AsyncArchiver(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim)
+        : turbovec_idx_(turbovec_idx), embedding_dim_(embedding_dim) {
+        worker_ = std::thread(&AsyncArchiver::worker_loop, this);
+    }
+
+    ~AsyncArchiver() {
+        stop();
+    }
+
+    void enqueue(uint64_t logical_id, const float* data) {
+        if (!data || stop_.load(std::memory_order_relaxed)) return;
+        Task task;
+        task.logical_id = logical_id;
+        task.data.assign(data, data + embedding_dim_);
+
+        pending_count_.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            queue_.push(std::move(task));
+        }
+        cv_work_.notify_one();
+    }
+
+    void flush() {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        cv_done_.wait(lock, [this] {
+            return pending_count_.load(std::memory_order_acquire) == 0;
+        });
+    }
+
+    void stop() {
+        bool expected = false;
+        if (stop_.compare_exchange_strong(expected, true)) {
+            cv_work_.notify_all();
+            if (worker_.joinable()) {
+                worker_.join();
+            }
+        }
+    }
+
+private:
+    void worker_loop() {
+        while (true) {
+            Task task;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                cv_work_.wait(lock, [this] {
+                    return stop_.load(std::memory_order_relaxed) || !queue_.empty();
+                });
+
+                if (stop_.load(std::memory_order_relaxed) && queue_.empty()) {
+                    break;
+                }
+
+                task = std::move(queue_.front());
+                queue_.pop();
+            }
+
+            turbovec_insert_zero_copy(
+                turbovec_idx_,
+                task.logical_id,
+                task.data.data(),
+                embedding_dim_
+            );
+
+            size_t rem = pending_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+            if (rem == 0) {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                cv_done_.notify_all();
+            }
+        }
+    }
+
+    TurbovecIndexHandle* turbovec_idx_{nullptr};
+    uint32_t embedding_dim_{0};
+    struct Task {
+        uint64_t logical_id{0};
+        std::vector<float> data;
+    };
+    std::queue<Task> queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable cv_work_;
+    std::condition_variable cv_done_;
+    std::atomic<bool> stop_{false};
+    std::atomic<size_t> pending_count_{0};
+    std::thread worker_;
+};
+
+KVSurgeon::KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim, bool enable_async)
+    : turbovec_idx_(turbovec_idx), embedding_dim_(embedding_dim) {
+    if (enable_async && turbovec_idx_ != nullptr) {
+        async_archiver_ = std::make_unique<AsyncArchiver>(turbovec_idx_, embedding_dim_);
+    }
+}
+
+KVSurgeon::~KVSurgeon() {
+    if (async_archiver_) {
+        async_archiver_->stop();
+    }
+}
+
+void KVSurgeon::flush_archiver() {
+    if (async_archiver_) {
+        async_archiver_->flush();
+    }
+}
 
 EvictionRange KVSurgeon::plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window, uint32_t min_batch) const {
     if (current_token_len <= sink_size + recent_window) {
@@ -63,13 +174,19 @@ bool KVSurgeon::execute_eviction(
     }
 
     // Insert verified representations into TurboQuant vector index under immutable logical IDs
-    for (size_t i = 0; i < count; ++i) {
-        TurbovecStatus insert_st = turbovec_insert_zero_copy(
-            turbovec_idx_, logical_ids[i], extracted_vecs[i], embedding_dim_
-        );
-        if (insert_st != TURBOVEC_STATUS_OK) {
-            // Insertion into vector memory failed: abort eviction immediately to protect unarchived context
-            return false;
+    if (async_archiver_) {
+        for (size_t i = 0; i < count; ++i) {
+            async_archiver_->enqueue(logical_ids[i], extracted_vecs[i]);
+        }
+    } else {
+        for (size_t i = 0; i < count; ++i) {
+            TurbovecStatus insert_st = turbovec_insert_zero_copy(
+                turbovec_idx_, logical_ids[i], extracted_vecs[i], embedding_dim_
+            );
+            if (insert_st != TURBOVEC_STATUS_OK) {
+                // Insertion into vector memory failed: abort eviction immediately to protect unarchived context
+                return false;
+            }
         }
     }
 
@@ -94,6 +211,10 @@ bool KVSurgeon::execute_eviction(
 }
 
 KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim) const {
+    if (async_archiver_) {
+        const_cast<AsyncArchiver*>(async_archiver_.get())->flush();
+    }
+
     KVSurgeryStats stats;
     stats.archived_chunks = total_archived_tokens_;
     stats.current_rope_shift = cumulative_rope_shift_;
@@ -112,6 +233,9 @@ KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint
 }
 
 void KVSurgeon::reset() {
+    if (async_archiver_) {
+        async_archiver_->flush();
+    }
     total_archived_tokens_ = 0;
     active_tokens_ = 0;
     cumulative_rope_shift_ = 0;

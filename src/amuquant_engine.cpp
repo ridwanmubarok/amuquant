@@ -8,6 +8,10 @@ AMUQuantEngine::AMUQuantEngine(const AMUQuantConfig& config)
     : config_(config) {}
 
 AMUQuantEngine::~AMUQuantEngine() {
+    controller_.reset();
+    kv_surgeon_.reset();
+    layer_mgr_.reset();
+    telemetry_.reset();
     if (turbovec_handle_ != nullptr) {
         turbovec_free(turbovec_handle_);
         turbovec_handle_ = nullptr;
@@ -87,6 +91,10 @@ StepDecision AMUQuantEngine::step_token(
 std::vector<SearchResult> AMUQuantEngine::recall_context(const float* query_data, uint32_t top_k) {
     if (turbovec_handle_ == nullptr || query_data == nullptr || top_k == 0) {
         return {};
+    }
+
+    if (kv_surgeon_) {
+        kv_surgeon_->flush_archiver();
     }
 
     metrics_.total_turbovec_queries++;

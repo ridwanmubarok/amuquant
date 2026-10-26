@@ -12,8 +12,11 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
+#include <memory>
 
 namespace amuquant {
+
+class AsyncArchiver;
 
 struct EvictionRange {
     int32_t p_start{-1};
@@ -100,8 +103,8 @@ using KVSeqAddFunc = std::function<void(int32_t p0, int32_t p1, int32_t delta)>;
 
 class KVSurgeon {
 public:
-    KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim);
-    ~KVSurgeon() = default;
+    KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim, bool enable_async = true);
+    ~KVSurgeon();
 
     /**
      * @brief Computes middle-token eviction bounds preserving initial sink tokens and recent window.
@@ -120,6 +123,11 @@ public:
     );
 
     /**
+     * @brief Flushes any pending background archival tasks to ensure index consistency.
+     */
+    void flush_archiver();
+
+    /**
      * @brief Returns active KV and compressed index memory metrics.
      */
     KVSurgeryStats get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim) const;
@@ -136,6 +144,7 @@ private:
     uint32_t active_tokens_{0};
     int32_t cumulative_rope_shift_{0};
     TokenIndexMap token_map_;
+    std::unique_ptr<AsyncArchiver> async_archiver_;
 };
 
 } // namespace amuquant

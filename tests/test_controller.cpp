@@ -26,7 +26,8 @@ int main() {
     TurbovecIndexHandle* handle = nullptr;
     turbovec_init(cfg.embedding_dim, cfg.initial_bit_width, &handle);
 
-    auto telemetry = std::make_shared<SystemTelemetry>();
+    {
+        auto telemetry = std::make_shared<SystemTelemetry>();
     telemetry->set_mock_mode(true);
 
     auto layer_mgr = std::make_shared<LayerManager>();
@@ -111,6 +112,8 @@ int main() {
     auto d6 = controller.on_token_step(5, 750, extractor, seq_rm, seq_add);
     assert(d6.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL);
     std::cout << "  - External Host Starvation (Low Process RSS, Exhausted System RAM) -> Triggered Regime 3: OK" << std::endl;
+
+    }
 
     turbovec_free(handle);
     std::cout << "[PASS] AMUQuantController & State Machine Validation Succeeded.\n" << std::endl;
