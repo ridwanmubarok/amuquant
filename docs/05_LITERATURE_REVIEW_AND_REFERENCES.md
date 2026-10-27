@@ -72,7 +72,7 @@ AMU-QUANT bridges the disciplines of Data Science and Natural Language Processin
 | **Fate of Pruned Tokens** | Unpruned | Discarded (*Lost forever*) | Unpruned | Stored in Index | **Archived (*Evict-to-Index*)** |
 | **Past Context Restoration** | N/A | Impossible | N/A | Vector DB RAG | **Episodic Associative SIMD Recall** |
 | **OS Memory Awareness** | None | None | Passive OS Handling | None | **Yes (Predictive Metric $\Phi_t$)** |
-| **Inference Survival** | Slow ($\approx 0.05$ tok/s) | High risk of OOM | Crash OOM on long contexts | N/A | **100% Zero-OOM Survival** |
+| **Inference Survival** | Slow ($\approx 0.05$ tok/s) | High risk of OOM | Crash OOM on long contexts | N/A | **100% Completion (Zero OOM Observed)** |
 
 > [!NOTE]
 > **Nature of Context Restoration**:

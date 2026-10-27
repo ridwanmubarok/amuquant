@@ -44,6 +44,24 @@ TurbovecStatus turbovec_insert_zero_copy(
 );
 
 /**
+ * @brief Removes a previously inserted vector by its chunk identifier.
+ * Provides transactional rollback capabilities when an eviction batch fails midway.
+ */
+TurbovecStatus turbovec_remove(
+    TurbovecIndexHandle* handle,
+    uint64_t chunk_id
+);
+
+/**
+ * @brief Removes a batch of vectors by their chunk identifiers.
+ */
+TurbovecStatus turbovec_remove_batch(
+    TurbovecIndexHandle* handle,
+    const uint64_t* chunk_ids,
+    size_t count
+);
+
+/**
  * @brief Queries Top-K cosine similarity matches via SIMD dot-product acceleration.
  */
 TurbovecStatus turbovec_search_simd(

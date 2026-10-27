@@ -43,16 +43,34 @@ public:
     void on_layer_forward_end(uint32_t layer_idx, bool aggressive_evict);
 
     /**
-     * @brief Returns the estimated resident weight footprint across all registered layers.
-     * Tracks AMU-QUANT's logical prefetch/eviction intent state (is_resident).
+     * @brief Returns the scheduled resident weight footprint across all registered layers.
+     * Reflects AMU-QUANT's logical prefetch and eviction advisory intent state.
      */
-    uint64_t get_resident_weight_bytes() const;
+    uint64_t get_scheduled_resident_bytes() const;
+
+    /**
+     * @brief Backwards-compatible alias for get_scheduled_resident_bytes().
+     */
+    uint64_t get_resident_weight_bytes() const { return get_scheduled_resident_bytes(); }
+
+    /**
+     * @brief Returns the total registered weight footprint across all layers.
+     */
+    uint64_t get_total_registered_bytes() const;
+
+    /**
+     * @brief Returns the verified physically evicted weight bytes across all layers.
+     * Computed as: total_registered_bytes - total_actual_resident_bytes (via mincore).
+     */
+    uint64_t get_actual_evicted_bytes() const;
 
     /**
      * @brief Queries actual resident bytes for a layer directly from kernel page tables via mincore(2).
      *
      * Disambiguates internal advisory tracking status (is_resident) from physical RAM residency.
-     * Note: posix_madvise is an OS advisory; mincore(2) verifies whether page frames are physical core-resident.
+     * Note: posix_madvise is an OS advisory; mincore(2) verifies whether page frames are physical core-resident
+     * in the CPU virtual address space for file-backed mmap regions. It does not measure separate GPU device
+     * or unified memory buffers managed outside CPU page tables.
      *
      * @param layer_idx Index of the layer to query.
      * @return Physical resident memory in bytes, or 0 if unmapped / failed.

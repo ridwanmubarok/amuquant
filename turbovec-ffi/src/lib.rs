@@ -82,6 +82,53 @@ pub unsafe extern "C" fn turbovec_insert_zero_copy(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn turbovec_remove(
+    handle: *mut TurbovecIndexHandle,
+    chunk_id: u64,
+) -> TurbovecStatus {
+    if handle.is_null() {
+        return TurbovecStatus::ErrNullPointer;
+    }
+
+    let result = catch_unwind(|| {
+        let handle_ref = &*handle;
+        let mut index = handle_ref.inner.write().unwrap();
+        index.remove(chunk_id);
+    });
+
+    match result {
+        Ok(_) => TurbovecStatus::Ok,
+        Err(_) => TurbovecStatus::ErrPanicCaught,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn turbovec_remove_batch(
+    handle: *mut TurbovecIndexHandle,
+    chunk_ids: *const u64,
+    count: usize,
+) -> TurbovecStatus {
+    if handle.is_null() {
+        return TurbovecStatus::ErrNullPointer;
+    }
+    if chunk_ids.is_null() && count > 0 {
+        return TurbovecStatus::ErrNullPointer;
+    }
+
+    let result = catch_unwind(|| {
+        let handle_ref = &*handle;
+        let id_slice = slice::from_raw_parts(chunk_ids, count);
+        let mut index = handle_ref.inner.write().unwrap();
+        index.remove_batch(id_slice);
+    });
+
+    match result {
+        Ok(_) => TurbovecStatus::Ok,
+        Err(_) => TurbovecStatus::ErrPanicCaught,
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn turbovec_search_simd(
     handle: *const TurbovecIndexHandle,
     query_ptr: *const f32,

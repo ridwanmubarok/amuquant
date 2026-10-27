@@ -83,10 +83,11 @@ double AMUQuantController::evaluate_action_cost(
                           (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
     if (safe_limit == 0) return 0.0;
 
-    // Dynamic architecture-aware KV sizing: 2 * num_layers * kv_heads * head_dim * sizeof(fp16)
+    // Dynamic architecture-aware KV sizing: 2 * num_layers * kv_heads * head_dim * kv_bytes_per_element
     uint32_t n_heads = (config_.kv_heads > 0) ? config_.kv_heads : 8;
     uint32_t d_head = (config_.head_dim > 0) ? config_.head_dim : 128;
-    size_t bytes_per_token = 2ULL * config_.num_layers * n_heads * d_head * sizeof(uint16_t);
+    uint32_t elem_bytes = (config_.kv_bytes_per_element > 0) ? config_.kv_bytes_per_element : 2;
+    size_t bytes_per_token = 2ULL * config_.num_layers * n_heads * d_head * elem_bytes;
     if (bytes_per_token == 0) bytes_per_token = 36864;
 
     double memory_mitigation_bytes = 0.0;
@@ -293,7 +294,8 @@ void AMUQuantController::apply_regime_transition(
 
     uint32_t n_heads = (config_.kv_heads > 0) ? config_.kv_heads : 8;
     uint32_t d_head = (config_.head_dim > 0) ? config_.head_dim : 128;
-    size_t bytes_per_token = 2ULL * config_.num_layers * n_heads * d_head * sizeof(uint16_t);
+    uint32_t elem_bytes = (config_.kv_bytes_per_element > 0) ? config_.kv_bytes_per_element : 2;
+    size_t bytes_per_token = 2ULL * config_.num_layers * n_heads * d_head * elem_bytes;
     if (bytes_per_token == 0) bytes_per_token = 36864;
 
     switch (target) {

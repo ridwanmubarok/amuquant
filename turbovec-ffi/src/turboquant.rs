@@ -134,6 +134,21 @@ impl TurboIndex {
         }
     }
 
+    pub fn remove(&mut self, chunk_id: u64) -> bool {
+        if let Some(pos) = self.vectors.iter().position(|v| v.chunk_id == chunk_id) {
+            self.vectors.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_batch(&mut self, chunk_ids: &[u64]) -> usize {
+        let initial_len = self.vectors.len();
+        self.vectors.retain(|v| !chunk_ids.contains(&v.chunk_id));
+        initial_len - self.vectors.len()
+    }
+
     fn quantize_4bit(&self, val: f32) -> u8 {
         for (idx, &t) in self.thresholds_4bit.iter().enumerate() {
             if val < t {

@@ -36,6 +36,19 @@ public:
     void insert(uint64_t chunk_id, const float* data, size_t len);
 
     /**
+     * @brief Removes a quantized vector by its chunk identifier.
+     * Used for transactional rollback when an eviction batch fails midway.
+     * @return true if the chunk was found and removed; false otherwise.
+     */
+    bool remove(uint64_t chunk_id);
+
+    /**
+     * @brief Removes multiple quantized vectors by chunk identifiers in a single pass.
+     * @return Number of vectors removed.
+     */
+    size_t remove_batch(const uint64_t* chunk_ids, size_t count);
+
+    /**
      * @brief Computes Top-K cosine similarity candidates using SIMD-accelerated dot products.
      */
     std::vector<SearchResult> search_simd(const float* query_data, size_t len, uint32_t top_k) const;

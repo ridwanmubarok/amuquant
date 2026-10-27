@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <queue>
 #include <cstring>
+#include <unordered_set>
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -227,6 +228,34 @@ void TurboQuantEngine::insert(uint64_t chunk_id, const float* data, size_t len) 
 
     std::lock_guard<std::mutex> lock(mutex_);
     vectors_.push_back(std::move(qv));
+}
+
+bool TurboQuantEngine::remove(uint64_t chunk_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::find_if(vectors_.begin(), vectors_.end(), [chunk_id](const QuantizedVector& qv) {
+        return qv.chunk_id == chunk_id;
+    });
+    if (it != vectors_.end()) {
+        vectors_.erase(it);
+        return true;
+    }
+    return false;
+}
+
+size_t TurboQuantEngine::remove_batch(const uint64_t* chunk_ids, size_t count) {
+    if (chunk_ids == nullptr || count == 0) {
+        return 0;
+    }
+    std::unordered_set<uint64_t> ids(chunk_ids, chunk_ids + count);
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t initial_size = vectors_.size();
+    vectors_.erase(
+        std::remove_if(vectors_.begin(), vectors_.end(), [&ids](const QuantizedVector& qv) {
+            return ids.find(qv.chunk_id) != ids.end();
+        }),
+        vectors_.end()
+    );
+    return initial_size - vectors_.size();
 }
 
 std::vector<SearchResult> TurboQuantEngine::search_simd(const float* query_data, size_t len, uint32_t top_k) const {

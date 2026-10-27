@@ -113,7 +113,9 @@ public:
 
     /**
      * @brief Extracts candidate KV tokens into TurboQuant index, prunes cache sequence, and applies RoPE delta.
-     * Guaranteed 2-phase transactional commit: validates and stages representations before altering KV-cache.
+     * Guaranteed 2-phase transactional commit with atomic rollback: validates and stages representations
+     * before altering KV-cache. If any vector insertion or sequence operation fails, previously inserted
+     * vectors are rolled back from the index, maintaining zero data corruption.
      */
     bool execute_eviction(
         const EvictionRange& range,

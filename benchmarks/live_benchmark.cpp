@@ -323,6 +323,8 @@ int main(int argc, char** argv) {
     const llama_vocab* vocab = llama_model_get_vocab(model);
     uint32_t embedding_length = model_info.embedding_length > 0 ? model_info.embedding_length : 4096;
     uint32_t block_count = model_info.block_count > 0 ? model_info.block_count : 32;
+    uint32_t model_head_dim = (model_info.head_dim > 0) ? model_info.head_dim : (embedding_length / (model_info.head_count > 0 ? model_info.head_count : 32));
+    if (model_head_dim == 0) model_head_dim = 128;
 
     uint64_t model_mem_limit = 4800ULL * 1024ULL * 1024ULL;
     uint64_t model_os_reserved = 600ULL * 1024ULL * 1024ULL;
@@ -626,7 +628,8 @@ int main(int argc, char** argv) {
             cfg.min_recent_window_tokens = 16;
             cfg.attention_sink_tokens = 4;
             cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-            cfg.head_dim = 128;
+            cfg.head_dim = model_head_dim;
+            cfg.kv_bytes_per_element = 2;
             cfg.policy = selected_policy;
 
             AMUQuantEngine engine(cfg);
@@ -656,9 +659,11 @@ int main(int argc, char** argv) {
             };
 
             auto seq_rm = [&](int32_t p0, int32_t p1) {
-                llama_memory_seq_rm(mem, 0, p0, p1);
+                if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+                    throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+                }
                 uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * 128 * sizeof(uint16_t);
+                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * model_head_dim * sizeof(uint16_t);
                 amuquant_res.kv_logical_reclaimed_kb += ((p1 - p0) * bytes_per_token) / 1024;
             };
 
@@ -889,7 +894,8 @@ int main(int argc, char** argv) {
             cfg.min_recent_window_tokens = 16;
             cfg.attention_sink_tokens = 4;
             cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-            cfg.head_dim = 128;
+            cfg.head_dim = model_head_dim;
+            cfg.kv_bytes_per_element = 2;
             cfg.policy = selected_policy;
 
             AMUQuantEngine engine(cfg);
@@ -918,9 +924,11 @@ int main(int argc, char** argv) {
             };
 
             auto seq_rm = [&](int32_t p0, int32_t p1) {
-                llama_memory_seq_rm(mem, 0, p0, p1);
+                if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+                    throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+                }
                 uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * 128 * sizeof(uint16_t);
+                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * model_head_dim * sizeof(uint16_t);
                 amuquant_agent_res.kv_logical_reclaimed_kb += ((p1 - p0) * bytes_per_token) / 1024;
             };
 
@@ -1064,7 +1072,8 @@ int main(int argc, char** argv) {
         cfg.min_recent_window_tokens = 16;
         cfg.attention_sink_tokens = 4;
         cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-        cfg.head_dim = 128;
+        cfg.head_dim = model_head_dim;
+        cfg.kv_bytes_per_element = 2;
         cfg.policy = selected_policy;
 
         AMUQuantEngine engine(cfg);
@@ -1094,9 +1103,11 @@ int main(int argc, char** argv) {
         };
 
         auto seq_rm = [&](int32_t p0, int32_t p1) {
-            llama_memory_seq_rm(mem, 0, p0, p1);
+            if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+                throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+            }
             uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-            size_t bytes_per_token = 2ULL * block_count * n_kv_heads * 128 * sizeof(uint16_t);
+            size_t bytes_per_token = 2ULL * block_count * n_kv_heads * model_head_dim * sizeof(uint16_t);
             mock_stress_res.kv_logical_reclaimed_kb += ((p1 - p0) * bytes_per_token) / 1024;
         };
 
@@ -1269,7 +1280,8 @@ int main(int argc, char** argv) {
         cfg.min_recent_window_tokens = 16;
         cfg.attention_sink_tokens = 4;
         cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-        cfg.head_dim = 128;
+        cfg.head_dim = model_head_dim;
+        cfg.kv_bytes_per_element = 2;
         cfg.policy = selected_policy;
 
         AMUQuantEngine engine(cfg);
@@ -1299,9 +1311,11 @@ int main(int argc, char** argv) {
         };
 
         auto seq_rm = [&](int32_t p0, int32_t p1) {
-            llama_memory_seq_rm(mem, 0, p0, p1);
+            if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+                throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+            }
             uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-            size_t bytes_per_token = 2ULL * block_count * n_kv_heads * 128 * sizeof(uint16_t);
+            size_t bytes_per_token = 2ULL * block_count * n_kv_heads * model_head_dim * sizeof(uint16_t);
             real_stress_res.kv_logical_reclaimed_kb += ((p1 - p0) * bytes_per_token) / 1024;
         };
 
@@ -1476,7 +1490,8 @@ int main(int argc, char** argv) {
             cfg.num_layers = block_count;
             cfg.embedding_dim = embedding_length;
             cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-            cfg.head_dim = 128;
+            cfg.head_dim = model_head_dim;
+            cfg.kv_bytes_per_element = 2;
             cfg.eval_interval_tokens = 4;
             cfg.min_eviction_batch = 16;
             cfg.recent_window_tokens = 32;
@@ -1510,9 +1525,11 @@ int main(int argc, char** argv) {
             };
 
             auto seq_rm = [&](int32_t p0, int32_t p1) {
-                llama_memory_seq_rm(mem, 0, p0, p1);
+                if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+                    throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+                }
                 uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * 128 * sizeof(uint16_t);
+                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * model_head_dim * sizeof(uint16_t);
                 abl_res.kv_logical_reclaimed_kb += ((p1 - p0) * bytes_per_token) / 1024;
             };
 
@@ -1705,7 +1722,8 @@ int main(int argc, char** argv) {
             cfg.min_recent_window_tokens = 16;
             cfg.attention_sink_tokens = 4;
             cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-            cfg.head_dim = 128;
+            cfg.head_dim = model_head_dim;
+            cfg.kv_bytes_per_element = 2;
             cfg.policy = selected_policy;
 
             AMUQuantEngine engine(cfg);
@@ -1735,9 +1753,11 @@ int main(int argc, char** argv) {
             };
 
             auto seq_rm = [&](int32_t p0, int32_t p1) {
-                llama_memory_seq_rm(mem, 0, p0, p1);
+                if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+                    throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+                }
                 uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
-                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * 128 * sizeof(uint16_t);
+                size_t bytes_per_token = 2ULL * block_count * n_kv_heads * model_head_dim * sizeof(uint16_t);
                 extended_horizon_res.kv_logical_reclaimed_kb += ((p1 - p0) * bytes_per_token) / 1024;
             };
 

@@ -26,12 +26,12 @@ Prior systems exhibit four critical systemic limitations:
 * **Static TurboQuant Lacks Runtime Adaptability:** Early TurboQuant integrations ([Zandieh et al., ICLR 2026](https://arxiv.org/abs/2504.19874)) in community branches ([TheTom, 2026](https://github.com/TheTom/llama-cpp-turboquant); [AmesianX, 2026](https://github.com/AmesianX/TurboQuant); [Issue #20977](https://github.com/ggml-org/llama.cpp/issues/20977); [PR #21038](https://github.com/ggml-org/llama.cpp/pull/21038)) require pre-configured bit-widths; they cannot adjust compression dynamically when available RAM fluctuates mid-generation.
 * **The turbovec Library Lacks Native C++ Integration:** The high-performance `turbovec` crate ([Codrai, 2026](https://github.com/RyanCodrai/turbovec)) achieves 7.8× (4-bit) and 15.5× (2-bit) compression in microseconds via CPU SIMD, but only targets Rust and Python, lacking a zero-copy C-ABI bridge to `llama.cpp` (C++).
 
-**AMU-QUANT** resolves this dilemma through a co-adaptive runtime memory management engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`) protected by a guaranteed **Transactional Eviction Barrier**. Concurrently, it coordinates advisory virtual memory paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model segments.
+**AMU-QUANT** resolves this dilemma through a co-adaptive runtime memory management engine implemented in native C++17 and Rust. It continuously monitors OS physical memory telemetry during autoregressive decoding. When memory pressure rises, AMU-QUANT excises middle tokens from the physical KV-cache in `llama.cpp` to free RAM immediately, archiving their representations into `turbovec` (4-bit or 2-bit) via a zero-copy C-ABI bridge (`turbovec-ffi`) protected by a verified **Two-Phase Commit Transactional Eviction Barrier with Atomic Rollback**. Concurrently, it coordinates advisory virtual memory paging via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model segments.
 
 ### System Architecture and Research Scope
 * **Primary Research Contribution**: A unified **Co-Adaptive Runtime Memory Policy & Transactional KV-Cache Compression** framework for resource-constrained on-device LLM inference.
 * **Integrated Systems Modules**:
-  1. **Transactional KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment and persistent translation mapping (`TokenIndexMap`), backed by a synchronous commit barrier ensuring zero unarchived context loss.
+  1. **Transactional KV-Cache Surgery Engine**: Atomic sequence pruning with Rotary Position Embedding (RoPE) gap realignment and persistent translation mapping (`TokenIndexMap`), backed by a two-phase commit barrier with rollback guaranteeing zero unarchived context loss or partial index pollution.
   2. **Episodic Vector Memory**: Non-uniform Lloyd-Max scalar quantization (4-bit/2-bit) providing sub-millisecond semantic retrieval without unbounded memory growth.
   3. **Advisory Virtual Memory Paging**: Evaluates OS kernel paging hints via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model file segments, with true physical residency verified via `mincore(2)` kernel page tables. Fine-grained intra-forward tensor computation hook streaming is an exploratory optimization under active investigation.
 
@@ -50,13 +50,13 @@ From **Data Science** and **Natural Language Processing (NLP)** perspectives, th
 
 ### 1.1 Core System Architecture & Design Principles
 
-AMU-QUANT is architected around four cohesive systems principles designed to enable uninterrupted, zero-OOM on-device autoregressive inference:
+AMU-QUANT is architected around four cohesive systems principles designed to enable uninterrupted, bounded-memory on-device autoregressive inference:
 
 1. **Predictive Virtual Memory Lookahead**:
    Rather than reacting only after host RAM is exhausted or kernel page swapping begins, AMU-QUANT samples host operating system virtual memory telemetry (Resident Set Size, available RAM, swap usage, and major page faults). It evaluates the differential growth rate $\dot{M}_{\text{proc}}$ to forecast memory demands over a lookahead horizon ($\tau_{\text{horizon}} = 2.0\text{ s}$), triggering mitigation pre-emptively.
 
 2. **Transactional KV-Cache Surgery**:
-   Context eviction in traditional systems causes permanent loss of previous token state. AMU-QUANT implements a strict **Batch Commit Barrier**: when context must be pruned from the attention buffer to bound RAM growth, tokens are first vectorized and committed into an episodic vector memory (`turbovec`). Physical slots in `llama.cpp` are pruned via `llama_memory_seq_rm()` strictly after insertion is verified. If any insertion fails, the eviction transaction aborts and context remains intact.
+   Context eviction in traditional systems causes permanent loss of previous token state. AMU-QUANT implements a strict **Two-Phase Commit Barrier with Atomic Rollback**: when context must be pruned from the attention buffer to bound RAM growth, tokens are first vectorized and committed into an episodic vector memory (`turbovec`). Physical slots in `llama.cpp` are pruned via `llama_memory_seq_rm()` strictly after insertion is verified. If any vector insertion or sequence operation fails, the transaction aborts, previously inserted vectors are rolled back via `turbovec_remove`, and context remains intact.
 
 3. **Multi-Tier Precision Compression**:
    Archived context is managed via high-performance, non-uniform Lloyd-Max scalar quantization implemented with native SIMD acceleration (ARM NEON / AVX2):
@@ -324,11 +324,11 @@ Logical KV-Cache Capacity Reclaimed:
   AMU-QUANT (Co-Adapt)   [  2448 KB  ]  |========================================| (2.4 MB freed)
 ```
 
-| Execution Method | Throughput (tok/s) | Visual Distribution | Logical KV Reclaimed | Zero-OOM Status |
+| Execution Method | Throughput (tok/s) | Visual Distribution | Logical KV Reclaimed | Completion Rate |
 | :--- | :---: | :--- | :---: | :---: |
 | **Baseline 1 (Raw Vanilla)** | 22.10 tok/s | `███████████████████░░` 22.10 | 0 KB | 100% |
 | **Baseline 2 (With Embeddings)** | 25.20 tok/s | `█████████████████████` 25.20 | 0 KB | 100% |
-| **AMU-QUANT Co-Adaptive** | **23.50 tok/s** | `████████████████████░` 23.50 | **2,448 KB (2.4 MB)** | **100% Guaranteed** |
+| **AMU-QUANT Co-Adaptive** | **23.50 tok/s** | `████████████████████░` 23.50 | **2,448 KB (2.4 MB)** | **100% Completed** |
 
 ---
 
@@ -369,7 +369,7 @@ To evaluate the mathematical validity of the state machine deterministically wit
 
 | Deterministic Stress Metric | Unmanaged Baseline 2 | AMU-QUANT State Machine Engine |
 | :--- | :--- | :--- |
-| **Zero-OOM Horizon Completed** | High OOM Risk (Memory Unbounded) | **100% Guaranteed Completion** |
+| **Observed Horizon Completion Rate** | Elevated OOM Risk (Memory Unbounded) | **100% Completed (Zero OOM Observed)** |
 | **Synthetic Telemetry Profile** | N/A | Available RAM: 350MB, Swap: 1.4GB |
 | **FSM Operational Transition** | Static (No Adaptation) | **REGIME 3 (Ultra-Low Survival Mode)** |
 | **Dynamic In-Place Requantization** | None (FP16 only) | **In-Place 4-bit -> 2-bit Lloyd-Max Downscaling** |
@@ -389,7 +389,7 @@ In contrast to deterministic mock testing, this scenario activates a controlled 
 
 | Real Stress Metric | Unmanaged Baseline 2 | AMU-QUANT Live Host Performance |
 | :--- | :--- | :--- |
-| **Zero-OOM Horizon Completed** | High OOM Risk (Memory Exhaustion) | **100% Guaranteed Completion** |
+| **Observed Horizon Completion Rate** | Elevated OOM Risk (Memory Exhaustion) | **100% Completed (Zero OOM Observed)** |
 | **Host Physical Memory Allocated** | 0 MB | **2,048 MB Real Dirty Pages** |
 | **Host Telemetry Sensing Mode** | Live OS Kernel | **Live macOS Kernel (mach_host_self / sysctl)** |
 | **Autonomous FSM Transition** | Static (No Adaptation) | **REGIME 3 (Ultra-Low Survival Mode)** |
@@ -427,7 +427,7 @@ On short horizons ($N < 100$ tokens), unmanaged baselines appear marginally fast
 | **256 tokens** | Empirically Verified (Scenario 6) | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
 | **1,024 tokens** | Analytical Projection | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
 | **4,096 tokens** | Analytical Projection | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
-| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
+| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Bounded Memory Footprint)** |
 
 #### Long-Context Memory Scaling Trajectory
 

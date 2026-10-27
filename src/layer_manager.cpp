@@ -44,11 +44,16 @@ void LayerManager::on_layer_forward_end(uint32_t layer_idx, bool aggressive_evic
 
 void LayerManager::evict_layer_pages(LayerDescriptor& layer) {
     if (layer.addr_start != nullptr && layer.byte_len > 0) {
+        int rc = 0;
 #if defined(POSIX_MADV_DONTNEED)
-        posix_madvise(layer.addr_start, layer.byte_len, POSIX_MADV_DONTNEED);
+        rc = posix_madvise(layer.addr_start, layer.byte_len, POSIX_MADV_DONTNEED);
 #elif defined(MADV_DONTNEED)
-        madvise(layer.addr_start, layer.byte_len, MADV_DONTNEED);
+        rc = madvise(layer.addr_start, layer.byte_len, MADV_DONTNEED);
 #endif
+        if (rc != 0) {
+            // Advisory system call failed; preserve residency intent to avoid state desync
+            return;
+        }
     }
     layer.is_resident = false;
     resident_layers_.erase(layer.layer_idx);
@@ -59,17 +64,22 @@ void LayerManager::prefetch_layer_pages(LayerDescriptor& layer) {
         return;
     }
     if (layer.addr_start != nullptr && layer.byte_len > 0) {
+        int rc = 0;
 #if defined(POSIX_MADV_WILLNEED)
-        posix_madvise(layer.addr_start, layer.byte_len, POSIX_MADV_WILLNEED);
+        rc = posix_madvise(layer.addr_start, layer.byte_len, POSIX_MADV_WILLNEED);
 #elif defined(MADV_WILLNEED)
-        madvise(layer.addr_start, layer.byte_len, MADV_WILLNEED);
+        rc = madvise(layer.addr_start, layer.byte_len, MADV_WILLNEED);
 #endif
+        if (rc != 0) {
+            // Advisory prefetch call failed; do not update intent tracking
+            return;
+        }
     }
     layer.is_resident = true;
     resident_layers_.insert(layer.layer_idx);
 }
 
-uint64_t LayerManager::get_resident_weight_bytes() const {
+uint64_t LayerManager::get_scheduled_resident_bytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t total = 0;
     for (uint32_t idx : resident_layers_) {
@@ -78,6 +88,26 @@ uint64_t LayerManager::get_resident_weight_bytes() const {
         }
     }
     return total;
+}
+
+uint64_t LayerManager::get_total_registered_bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t total = 0;
+    for (const auto& layer : layers_) {
+        total += layer.byte_len;
+    }
+    return total;
+}
+
+uint64_t LayerManager::get_actual_evicted_bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t total_mapped = 0;
+    uint64_t actual_resident = 0;
+    for (const auto& layer : layers_) {
+        total_mapped += layer.byte_len;
+        actual_resident += query_actual_resident_bytes_locked(layer);
+    }
+    return (total_mapped > actual_resident) ? (total_mapped - actual_resident) : 0;
 }
 
 uint64_t LayerManager::query_actual_resident_bytes_locked(const LayerDescriptor& layer) const {

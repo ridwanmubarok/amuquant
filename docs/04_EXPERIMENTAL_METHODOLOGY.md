@@ -119,7 +119,7 @@ Projects theoretical and empirical memory savings for Qwen2.5-3B across expandin
 | **256 tokens** | Empirically Verified (Scenario 6) | 33.55 MB | 4.71 MB | 0.22 MB | **6.8x reduction** |
 | **1,024 tokens** | Analytical Projection | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
 | **4,096 tokens** | Analytical Projection | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
-| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Zero-OOM)** |
+| **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Bounded Memory Footprint)** |
 ---
 
 # Part II: Proposed Academic Evaluation Protocol
@@ -170,7 +170,7 @@ flowchart TD
     subgraph S2 ["Scenario 2: Dynamic Memory Pressure Injection"]
         S2_In["External Synthetic Memory Spikes: 2 GB to 6 GB RAM"]
         S2_Trigger["Triggered Mid-Generation during Autoregressive Decoding"]
-        S2_Out["Verify Regime Transitions (R1 -> R2 -> R3) & Zero-OOM Prevention"]
+        S2_Out["Verify Regime Transitions (R1 -> R2 -> R3) & OOM Prevention"]
     end
 
     subgraph S3 ["Scenario 3: Context Retrieval & Perplexity Retention"]

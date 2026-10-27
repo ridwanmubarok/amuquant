@@ -118,6 +118,51 @@ static void test_transactional_eviction_rollback() {
     turbovec_free(handle);
 }
 
+static void test_atomic_rollback_on_seq_rm_failure() {
+    std::cout << "[TEST] Running Atomic Rollback Verification on Sequence Removal Failure..." << std::endl;
+    TurbovecIndexHandle* handle = nullptr;
+    TurbovecStatus st = turbovec_init(128, 4, &handle);
+    assert(st == TURBOVEC_STATUS_OK && handle != nullptr);
+
+    {
+        KVSurgeon surgeon(handle, 128, false); // Synchronous execution to test immediate rollback
+        TokenIndexMap& tmap = surgeon.get_token_map();
+        tmap.init(40);
+
+        std::vector<float> sample_vec(128, 0.77f);
+        auto valid_extractor = [&](int32_t) -> const float* {
+            return sample_vec.data();
+        };
+
+        // Simulated failing seq_rm that throws runtime_error
+        auto failing_seq_rm = [&](int32_t, int32_t) {
+            throw std::runtime_error("Simulated llama_memory_seq_rm memory failure");
+        };
+        auto seq_add = [&](int32_t, int32_t, int32_t) {};
+
+        EvictionRange range{4, 20}; // 16 tokens to evict
+        bool success = surgeon.execute_eviction(range, valid_extractor, failing_seq_rm, seq_add);
+        assert(!success);
+
+        // Verification 1: Token map remains completely unaltered
+        assert(tmap.physical_size() == 40);
+        for (int i = 0; i < 40; ++i) {
+            assert(tmap.get_logical_id(i) == static_cast<uint64_t>(i));
+        }
+
+        // Verification 2: Vector index was rolled back - querying for evacuated vectors returns 0 matches
+        uint64_t out_ids[4] = {0};
+        float out_scores[4] = {0.0f};
+        uint32_t out_count = 0;
+        TurbovecStatus sst = turbovec_search_simd(handle, sample_vec.data(), 4, out_ids, out_scores, &out_count);
+        assert(sst == TURBOVEC_STATUS_OK);
+        assert(out_count == 0); // No orphaned vectors in index
+        std::cout << "  - Vector Index Verified Clean Post-Rollback (Zero Orphaned Vectors): OK" << std::endl;
+    }
+
+    turbovec_free(handle);
+}
+
 static void test_repeated_eviction_invariants() {
     std::cout << "[TEST] Running Repeated Eviction Invariant Checks..." << std::endl;
     TurbovecIndexHandle* handle = nullptr;
@@ -158,6 +203,7 @@ static void test_repeated_eviction_invariants() {
 
 int main() {
     test_transactional_eviction_rollback();
+    test_atomic_rollback_on_seq_rm_failure();
     test_repeated_eviction_invariants();
     std::cout << "[TEST] Starting Realistic End-to-End AMU-QUANT Pipeline Verification..." << std::endl;
 
@@ -192,10 +238,16 @@ int main() {
     // Verify mincore(2) kernel page table telemetry
     uint64_t actual_layer_0 = engine.get_layer_manager()->get_actual_resident_bytes(0);
     uint64_t total_actual = engine.get_layer_manager()->get_total_actual_resident_bytes();
+    uint64_t total_registered = engine.get_layer_manager()->get_total_registered_bytes();
+    uint64_t actual_evicted = engine.get_layer_manager()->get_actual_evicted_bytes();
     assert(actual_layer_0 > 0);
     assert(total_actual >= actual_layer_0);
+    assert(total_registered == 16 * REAL_LAYER_BYTES);
+    assert(actual_evicted == total_registered - total_actual);
     std::cout << "  - mincore(2) Kernel Page Table Verification: Layer 0 resident = " 
-              << actual_layer_0 << " bytes, Total = " << total_actual << " bytes: OK" << std::endl;
+              << actual_layer_0 << " bytes, Total Actual = " << total_actual 
+              << " bytes, Registered = " << total_registered 
+              << " bytes, Evicted = " << actual_evicted << " bytes: OK" << std::endl;
 
     // 2. Prepare Realistic KV-Cache and Context Embedding Store
     constexpr uint32_t TOTAL_STEPS = 90;

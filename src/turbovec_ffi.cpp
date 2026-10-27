@@ -57,6 +57,42 @@ TurbovecStatus turbovec_insert_zero_copy(
     }
 }
 
+TurbovecStatus turbovec_remove(
+    TurbovecIndexHandle* handle,
+    uint64_t chunk_id
+) {
+    if (handle == nullptr) {
+        return TURBOVEC_ERR_NULL_POINTER;
+    }
+
+    try {
+        handle->engine.remove(chunk_id);
+        return TURBOVEC_STATUS_OK;
+    } catch (...) {
+        return TURBOVEC_ERR_PANIC_CAUGHT;
+    }
+}
+
+TurbovecStatus turbovec_remove_batch(
+    TurbovecIndexHandle* handle,
+    const uint64_t* chunk_ids,
+    size_t count
+) {
+    if (handle == nullptr) {
+        return TURBOVEC_ERR_NULL_POINTER;
+    }
+    if (chunk_ids == nullptr && count > 0) {
+        return TURBOVEC_ERR_NULL_POINTER;
+    }
+
+    try {
+        handle->engine.remove_batch(chunk_ids, count);
+        return TURBOVEC_STATUS_OK;
+    } catch (...) {
+        return TURBOVEC_ERR_PANIC_CAUGHT;
+    }
+}
+
 TurbovecStatus turbovec_search_simd(
     const TurbovecIndexHandle* handle,
     const float* query_ptr,

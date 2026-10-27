@@ -12,6 +12,6 @@
 | **Physical RAM Reclaimed** | 0 KB | 154 KB |
 | **Tokens Safely Archived** | 0 tokens | 77 tokens |
 | **Needle Retrieval Score** | N/A | 0.864226 (Cosine Match) |
-| **SIMD Retrieval Latency** | N/A | 112.125 µs |
+| **SIMD Retrieval Latency** | N/A | 126.208 µs |
 
 Generated automatically by `amuquant_benchmark`.

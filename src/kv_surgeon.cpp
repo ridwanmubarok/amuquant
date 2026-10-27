@@ -125,6 +125,7 @@ private:
             }
 
             bool all_ok = true;
+            size_t failed_idx = 0;
             for (size_t i = 0; i < task.logical_ids.size(); ++i) {
                 TurbovecStatus st = turbovec_insert_zero_copy(
                     turbovec_idx_,
@@ -134,7 +135,15 @@ private:
                 );
                 if (st != TURBOVEC_STATUS_OK) {
                     all_ok = false;
+                    failed_idx = i;
                     break;
+                }
+            }
+
+            if (!all_ok) {
+                // Atomic rollback: purge partially inserted vectors 0..failed_idx-1
+                for (size_t r = 0; r < failed_idx; ++r) {
+                    turbovec_remove(turbovec_idx_, task.logical_ids[r]);
                 }
             }
 
@@ -249,38 +258,52 @@ bool KVSurgeon::execute_eviction(
             return false;
         }
     } else {
+        bool all_ok = true;
+        size_t failed_idx = 0;
         for (size_t i = 0; i < count; ++i) {
             TurbovecStatus insert_st = turbovec_insert_zero_copy(
                 turbovec_idx_, logical_ids[i], extracted_vecs[i], embedding_dim_
             );
             if (insert_st != TURBOVEC_STATUS_OK) {
-                // Insertion into vector memory failed: abort eviction immediately to protect unarchived context
-                return false;
+                all_ok = false;
+                failed_idx = i;
+                break;
             }
+        }
+        if (!all_ok) {
+            // Atomic rollback of partially inserted vectors 0..failed_idx-1
+            for (size_t r = 0; r < failed_idx; ++r) {
+                turbovec_remove(turbovec_idx_, logical_ids[r]);
+            }
+            return false;
         }
     }
 
     // Phase 2: Transactional Commit
     // 1. Prune physical KV sequence slot range only after guaranteed vector archiving
-    if (seq_rm) {
-        seq_rm(range.p_start, range.p_end);
+    try {
+        if (seq_rm) {
+            seq_rm(range.p_start, range.p_end);
+        }
+        // 2. Apply RoPE positional shift to close the sequence gap:
+        int32_t shift_delta = -(range.p_end - range.p_start);
+        if (seq_add) {
+            seq_add(range.p_end, -1, shift_delta);
+        }
+
+        // 3. Update physical-to-logical translation table (preserves logical ID invariant)
+        token_map_.prune_range(range.p_start, range.p_end);
+
+        total_archived_tokens_ += static_cast<uint32_t>(count);
+        cumulative_rope_shift_ += shift_delta;
+        return true;
+    } catch (...) {
+        // Rollback all archived vectors from turbovec index upon sequence operation failure
+        for (uint64_t id : logical_ids) {
+            turbovec_remove(turbovec_idx_, id);
+        }
+        return false;
     }
-
-    // 2. Apply RoPE positional shift to close the sequence gap:
-    //    When sequence slots [p_start, p_end) are excised, downstream tokens must be
-    //    shifted leftward by shift_delta = -(p_end - p_start). This realigns rotary
-    //    position embeddings (RoPE) so relative attention distances remain coherent.
-    int32_t shift_delta = -(range.p_end - range.p_start);
-    if (seq_add) {
-        seq_add(range.p_end, -1, shift_delta);
-    }
-
-    // 3. Update physical-to-logical translation table (preserves logical ID invariant)
-    token_map_.prune_range(range.p_start, range.p_end);
-
-    total_archived_tokens_ += static_cast<uint32_t>(count);
-    cumulative_rope_shift_ += shift_delta;
-    return true;
 }
 
 KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim) const {

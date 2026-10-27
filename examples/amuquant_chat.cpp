@@ -192,6 +192,9 @@ int main(int argc, char** argv) {
     cfg.recent_window_tokens = 64;
     cfg.min_recent_window_tokens = 16;
     cfg.attention_sink_tokens = 4;
+    cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : (model_info.head_count > 0 ? model_info.head_count : 8);
+    cfg.head_dim = model_info.head_dim > 0 ? model_info.head_dim : 128;
+    cfg.kv_bytes_per_element = 2;
 
     AMUQuantEngine engine(cfg);
     if (engine.initialize() != Status::OK) {
@@ -295,7 +298,9 @@ int main(int argc, char** argv) {
     int32_t total_rope_shift = 0;
 
     auto seq_rm = [&](int32_t p0, int32_t p1) {
-        llama_memory_seq_rm(mem, 0, p0, p1);
+        if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
+            throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
+        }
     };
 
     auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) {

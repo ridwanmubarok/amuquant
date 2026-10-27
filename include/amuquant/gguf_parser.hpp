@@ -47,6 +47,7 @@ struct GGUFModelInfo {
     uint32_t context_length{0};
     uint32_t head_count{0};
     uint32_t head_count_kv{0};
+    uint32_t head_dim{0};
     uint64_t tensor_count{0};
     uint64_t metadata_kv_count{0};
     std::vector<GGUFTensorInfo> tensors;

@@ -100,9 +100,15 @@ bool GGUFParser::parse_file(const std::string& filepath, GGUFModelInfo& out_info
             f.read(reinterpret_cast<char*>(&out_info.head_count), 4);
         } else if (key.find(".attention.head_count_kv") != std::string::npos && val_type == static_cast<uint32_t>(GGUFType::UINT32)) {
             f.read(reinterpret_cast<char*>(&out_info.head_count_kv), 4);
+        } else if (key.find(".attention.key_length") != std::string::npos && val_type == static_cast<uint32_t>(GGUFType::UINT32)) {
+            f.read(reinterpret_cast<char*>(&out_info.head_dim), 4);
         } else {
             skip_gguf_value(f, val_type);
         }
+    }
+
+    if (out_info.head_dim == 0 && out_info.head_count > 0 && out_info.embedding_length > 0) {
+        out_info.head_dim = out_info.embedding_length / out_info.head_count;
     }
 
     // 3. Baca Metadata Tensor Info

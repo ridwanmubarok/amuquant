@@ -94,6 +94,7 @@ struct AMUQuantConfig {
     uint32_t embedding_dim{4096};
     uint32_t kv_heads{8};
     uint32_t head_dim{128};
+    uint32_t kv_bytes_per_element{2}; // Cache format bytes per scalar (2 = FP16, 1 = FP8/Q8_0, 4 = FP32)
     uint8_t initial_bit_width{4};
 
     // Arbitration decision policy and multi-objective weights
