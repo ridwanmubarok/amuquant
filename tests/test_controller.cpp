@@ -39,8 +39,8 @@ int main() {
     // Mock callback lambdas
     std::vector<float> dummy_vec(cfg.embedding_dim, 0.5f);
     auto extractor = [&](int32_t) -> const float* { return dummy_vec.data(); };
-    auto seq_rm = [](int32_t, int32_t) {};
-    auto seq_add = [](int32_t, int32_t, int32_t) {};
+    auto seq_rm = [](int32_t, int32_t) -> bool { return true; };
+    auto seq_add = [](int32_t, int32_t, int32_t) -> bool { return true; };
 
     // 1. Baseline state (RSS = 4 GB / 14 GB ~ 28% load) -> Expect REGIME_1
     MemoryStats s1{};
@@ -146,8 +146,8 @@ int main() {
 
             std::vector<float> dummy(cfg_opt.embedding_dim, 0.1f);
             auto extractor = [&](int32_t) -> const float* { return dummy.data(); };
-            auto seq_rm = [](int32_t, int32_t) {};
-            auto seq_add = [](int32_t, int32_t, int32_t) {};
+            auto seq_rm = [](int32_t, int32_t) -> bool { return true; };
+            auto seq_add = [](int32_t, int32_t, int32_t) -> bool { return true; };
 
             // 1. Low load: RSS = 4GB, Available = 10GB -> Controller selects REGIME_1
             MemoryStats s1{};
@@ -210,8 +210,8 @@ int main() {
 
         std::vector<float> dummy_vec(cfg.embedding_dim, 0.1f);
         auto extractor = [&](int32_t) -> const float* { return dummy_vec.data(); };
-        auto seq_rm = [](int32_t, int32_t) {};
-        auto seq_add = [](int32_t, int32_t, int32_t) {};
+        auto seq_rm = [](int32_t, int32_t) -> bool { return true; };
+        auto seq_add = [](int32_t, int32_t, int32_t) -> bool { return true; };
 
         // Trigger transition to Regime 2 (Load = 60% > theta_low)
         MemoryStats s{};

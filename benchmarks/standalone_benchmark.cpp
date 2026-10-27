@@ -181,11 +181,13 @@ int main(int argc, char** argv) {
         StandaloneKVCache kv_cache;
         kv_cache.embedding_dim = EMBEDDING_DIM;
 
-        auto seq_rm = [&](int32_t p0, int32_t p1) {
+        auto seq_rm = [&](int32_t p0, int32_t p1) -> bool {
             kv_cache.seq_rm(p0, p1);
+            return true;
         };
-        auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) {
+        auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) -> bool {
             kv_cache.seq_add(p0, p1, delta);
+            return true;
         };
 
         auto telemetry = engine.get_telemetry();

@@ -22,7 +22,7 @@ void LayerManager::on_layer_forward_begin(uint32_t layer_idx, uint32_t prefetch_
     if (layer_idx >= layers_.size()) return;
 
     layers_[layer_idx].is_resident = true;
-    resident_layers_.insert(layer_idx);
+    scheduled_layers_.insert(layer_idx);
 
     // Prefetch upcoming layers according to scheduled prefetch depth
     for (uint32_t d = 1; d <= prefetch_depth; ++d) {
@@ -56,7 +56,7 @@ void LayerManager::evict_layer_pages(LayerDescriptor& layer) {
         }
     }
     layer.is_resident = false;
-    resident_layers_.erase(layer.layer_idx);
+    scheduled_layers_.erase(layer.layer_idx);
 }
 
 void LayerManager::prefetch_layer_pages(LayerDescriptor& layer) {
@@ -76,13 +76,13 @@ void LayerManager::prefetch_layer_pages(LayerDescriptor& layer) {
         }
     }
     layer.is_resident = true;
-    resident_layers_.insert(layer.layer_idx);
+    scheduled_layers_.insert(layer.layer_idx);
 }
 
 uint64_t LayerManager::get_scheduled_resident_bytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t total = 0;
-    for (uint32_t idx : resident_layers_) {
+    for (uint32_t idx : scheduled_layers_) {
         if (idx < layers_.size()) {
             total += layers_[idx].byte_len;
         }
@@ -172,6 +172,35 @@ uint64_t LayerManager::get_total_actual_resident_bytes() const {
     return total;
 }
 
+std::unordered_set<uint32_t> LayerManager::get_actual_resident_layers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::unordered_set<uint32_t> actual_set;
+    for (const auto& layer : layers_) {
+        if (query_actual_resident_bytes_locked(layer) > 0) {
+            actual_set.insert(layer.layer_idx);
+        }
+    }
+    return actual_set;
+}
+
+std::unordered_set<uint32_t> LayerManager::get_scheduled_resident_layers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scheduled_layers_;
+}
+
+size_t LayerManager::sync_scheduled_with_actual_residency() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scheduled_layers_.clear();
+    for (auto& layer : layers_) {
+        uint64_t resident_bytes = query_actual_resident_bytes_locked(layer);
+        layer.is_resident = (resident_bytes > 0);
+        if (layer.is_resident) {
+            scheduled_layers_.insert(layer.layer_idx);
+        }
+    }
+    return scheduled_layers_.size();
+}
+
 size_t LayerManager::num_layers() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return layers_.size();
@@ -185,7 +214,7 @@ void LayerManager::reset() {
         }
     }
     layers_.clear();
-    resident_layers_.clear();
+    scheduled_layers_.clear();
 }
 
 } // namespace amuquant

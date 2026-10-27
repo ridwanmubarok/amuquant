@@ -297,15 +297,14 @@ int main(int argc, char** argv) {
 
     int32_t total_rope_shift = 0;
 
-    auto seq_rm = [&](int32_t p0, int32_t p1) {
-        if (!llama_memory_seq_rm(mem, 0, p0, p1)) {
-            throw std::runtime_error("llama_memory_seq_rm sequence deletion failed");
-        }
+    auto seq_rm = [&](int32_t p0, int32_t p1) -> bool {
+        return llama_memory_seq_rm(mem, 0, p0, p1);
     };
 
-    auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) {
+    auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) -> bool {
         llama_memory_seq_add(mem, 0, p0, p1, delta);
         total_rope_shift += delta;
+        return true;
     };
 
     llama_batch batch = llama_batch_init(512, 0, 1);

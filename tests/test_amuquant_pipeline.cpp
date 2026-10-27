@@ -75,8 +75,8 @@ static void test_transactional_eviction_rollback() {
         std::vector<float> sample_vec(128, 0.42f);
         int rm_calls = 0;
         int add_calls = 0;
-        auto seq_rm = [&](int32_t, int32_t) { rm_calls++; };
-        auto seq_add = [&](int32_t, int32_t, int32_t) { add_calls++; };
+        auto seq_rm = [&](int32_t, int32_t) -> bool { rm_calls++; return true; };
+        auto seq_add = [&](int32_t, int32_t, int32_t) -> bool { add_calls++; return true; };
 
         // Test 1: Extractor fails on token pos 10
         auto failing_extractor = [&](int32_t pos) -> const float* {
@@ -134,11 +134,11 @@ static void test_atomic_rollback_on_seq_rm_failure() {
             return sample_vec.data();
         };
 
-        // Simulated failing seq_rm that throws runtime_error
-        auto failing_seq_rm = [&](int32_t, int32_t) {
-            throw std::runtime_error("Simulated llama_memory_seq_rm memory failure");
+        // Simulated failing seq_rm that returns false
+        auto failing_seq_rm = [&](int32_t, int32_t) -> bool {
+            return false;
         };
-        auto seq_add = [&](int32_t, int32_t, int32_t) {};
+        auto seq_add = [&](int32_t, int32_t, int32_t) -> bool { return true; };
 
         EvictionRange range{4, 20}; // 16 tokens to evict
         bool success = surgeon.execute_eviction(range, valid_extractor, failing_seq_rm, seq_add);
@@ -157,7 +157,47 @@ static void test_atomic_rollback_on_seq_rm_failure() {
         TurbovecStatus sst = turbovec_search_simd(handle, sample_vec.data(), 4, out_ids, out_scores, &out_count);
         assert(sst == TURBOVEC_STATUS_OK);
         assert(out_count == 0); // No orphaned vectors in index
-        std::cout << "  - Vector Index Verified Clean Post-Rollback (Zero Orphaned Vectors): OK" << std::endl;
+        std::cout << "  - Vector Index Verified Clean Post-Rollback (Zero Orphaned Vectors on seq_rm=false): OK" << std::endl;
+    }
+
+    turbovec_free(handle);
+}
+
+static void test_atomic_rollback_on_seq_add_failure() {
+    std::cout << "[TEST] Running Atomic Rollback Verification on RoPE Shift (seq_add) Failure..." << std::endl;
+    TurbovecIndexHandle* handle = nullptr;
+    TurbovecStatus st = turbovec_init(128, 4, &handle);
+    assert(st == TURBOVEC_STATUS_OK && handle != nullptr);
+
+    {
+        KVSurgeon surgeon(handle, 128, false);
+        TokenIndexMap& tmap = surgeon.get_token_map();
+        tmap.init(40);
+
+        std::vector<float> sample_vec(128, 0.77f);
+        auto valid_extractor = [&](int32_t) -> const float* {
+            return sample_vec.data();
+        };
+
+        // seq_rm succeeds, but seq_add returns false
+        auto valid_seq_rm = [&](int32_t, int32_t) -> bool { return true; };
+        auto failing_seq_add = [&](int32_t, int32_t, int32_t) -> bool { return false; };
+
+        EvictionRange range{4, 20}; // 16 tokens to evict
+        bool success = surgeon.execute_eviction(range, valid_extractor, valid_seq_rm, failing_seq_add);
+        assert(!success);
+
+        // Token map unchanged
+        assert(tmap.physical_size() == 40);
+
+        // Vector index rolled back
+        uint64_t out_ids[4] = {0};
+        float out_scores[4] = {0.0f};
+        uint32_t out_count = 0;
+        TurbovecStatus sst = turbovec_search_simd(handle, sample_vec.data(), 4, out_ids, out_scores, &out_count);
+        assert(sst == TURBOVEC_STATUS_OK);
+        assert(out_count == 0);
+        std::cout << "  - Vector Index Verified Clean Post-Rollback on seq_add Failure: OK" << std::endl;
     }
 
     turbovec_free(handle);
@@ -176,8 +216,8 @@ static void test_repeated_eviction_invariants() {
 
         std::vector<float> dummy(64, 0.1f);
         auto extractor = [&](int32_t) -> const float* { return dummy.data(); };
-        auto seq_rm = [](int32_t, int32_t) {};
-        auto seq_add = [](int32_t, int32_t, int32_t) {};
+        auto seq_rm = [](int32_t, int32_t) -> bool { return true; };
+        auto seq_add = [](int32_t, int32_t, int32_t) -> bool { return true; };
 
         // Round 1: Evict [4, 24) (20 tokens)
         bool ok1 = surgeon.execute_eviction({4, 24}, extractor, seq_rm, seq_add);
@@ -204,6 +244,7 @@ static void test_repeated_eviction_invariants() {
 int main() {
     test_transactional_eviction_rollback();
     test_atomic_rollback_on_seq_rm_failure();
+    test_atomic_rollback_on_seq_add_failure();
     test_repeated_eviction_invariants();
     std::cout << "[TEST] Starting Realistic End-to-End AMU-QUANT Pipeline Verification..." << std::endl;
 
@@ -244,6 +285,14 @@ int main() {
     assert(total_actual >= actual_layer_0);
     assert(total_registered == 16 * REAL_LAYER_BYTES);
     assert(actual_evicted == total_registered - total_actual);
+
+    // Verify kernel synchronization (sync_scheduled_with_actual_residency)
+    auto actual_layers = engine.get_layer_manager()->get_actual_resident_layers();
+    assert(actual_layers.size() == 16);
+    size_t synced_count = engine.get_layer_manager()->sync_scheduled_with_actual_residency();
+    assert(synced_count == 16);
+    assert(engine.get_layer_manager()->get_scheduled_resident_bytes() == 16 * REAL_LAYER_BYTES);
+    std::cout << "  - Kernel Residency Synchronization: Verified 16 resident layers via mincore(2): OK" << std::endl;
     std::cout << "  - mincore(2) Kernel Page Table Verification: Layer 0 resident = " 
               << actual_layer_0 << " bytes, Total Actual = " << total_actual 
               << " bytes, Registered = " << total_registered 
@@ -271,12 +320,14 @@ int main() {
         return nullptr;
     };
 
-    auto seq_rm = [&](int32_t p0, int32_t p1) {
+    auto seq_rm = [&](int32_t p0, int32_t p1) -> bool {
         kv_cache.seq_rm(p0, p1);
+        return true;
     };
 
-    auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) {
+    auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) -> bool {
         kv_cache.seq_add(p0, p1, delta);
+        return true;
     };
 
     // 3. Test Atomic Archiving Guarantee: Verify that null extractor aborts eviction without pruning KV cache

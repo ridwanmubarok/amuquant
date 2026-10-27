@@ -281,29 +281,50 @@ bool KVSurgeon::execute_eviction(
 
     // Phase 2: Transactional Commit
     // 1. Prune physical KV sequence slot range only after guaranteed vector archiving
+    bool rm_ok = false;
     try {
         if (seq_rm) {
-            seq_rm(range.p_start, range.p_end);
+            rm_ok = seq_rm(range.p_start, range.p_end);
         }
-        // 2. Apply RoPE positional shift to close the sequence gap:
-        int32_t shift_delta = -(range.p_end - range.p_start);
-        if (seq_add) {
-            seq_add(range.p_end, -1, shift_delta);
-        }
-
-        // 3. Update physical-to-logical translation table (preserves logical ID invariant)
-        token_map_.prune_range(range.p_start, range.p_end);
-
-        total_archived_tokens_ += static_cast<uint32_t>(count);
-        cumulative_rope_shift_ += shift_delta;
-        return true;
     } catch (...) {
-        // Rollback all archived vectors from turbovec index upon sequence operation failure
+        rm_ok = false;
+    }
+
+    if (!rm_ok) {
+        // Phase 2a failure: sequence removal rejected by backend or threw exception.
+        // Rollback all archived vectors from turbovec index to prevent unpruned KV divergence.
         for (uint64_t id : logical_ids) {
             turbovec_remove(turbovec_idx_, id);
         }
         return false;
     }
+
+    // 2. Apply RoPE positional shift to close the sequence gap:
+    int32_t shift_delta = -(range.p_end - range.p_start);
+    bool add_ok = true;
+    try {
+        if (seq_add) {
+            add_ok = seq_add(range.p_end, -1, shift_delta);
+        }
+    } catch (...) {
+        add_ok = false;
+    }
+
+    if (!add_ok) {
+        // Phase 2b failure: RoPE positional adjustment rejected by backend or threw exception.
+        // Rollback all archived vectors from turbovec index.
+        for (uint64_t id : logical_ids) {
+            turbovec_remove(turbovec_idx_, id);
+        }
+        return false;
+    }
+
+    // 3. Update physical-to-logical translation table (preserves logical ID invariant)
+    token_map_.prune_range(range.p_start, range.p_end);
+
+    total_archived_tokens_ += static_cast<uint32_t>(count);
+    cumulative_rope_shift_ += shift_delta;
+    return true;
 }
 
 KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim) const {

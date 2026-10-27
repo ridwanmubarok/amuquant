@@ -86,12 +86,29 @@ public:
      */
     uint64_t get_total_actual_resident_bytes() const;
 
+    /**
+     * @brief Synchronizes scheduled advisory state with actual kernel page table residency.
+     * Inspects mincore(2) for all registered layers and updates scheduled_layers_ and is_resident flags.
+     * @return Number of layers verified physically resident in RAM.
+     */
+    size_t sync_scheduled_with_actual_residency();
+
+    /**
+     * @brief Returns the set of layer indices currently verified resident via mincore(2).
+     */
+    std::unordered_set<uint32_t> get_actual_resident_layers() const;
+
+    /**
+     * @brief Returns the set of layer indices currently scheduled as resident.
+     */
+    std::unordered_set<uint32_t> get_scheduled_resident_layers() const;
+
     size_t num_layers() const;
     void reset();
 
 private:
     std::vector<LayerDescriptor> layers_;
-    std::unordered_set<uint32_t> resident_layers_;
+    std::unordered_set<uint32_t> scheduled_layers_;
     mutable std::mutex mutex_;
 
     void evict_layer_pages(LayerDescriptor& layer);

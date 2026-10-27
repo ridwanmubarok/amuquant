@@ -98,8 +98,8 @@ private:
 };
 
 using KVVectorExtractor = std::function<const float*(int32_t token_pos)>;
-using KVSeqRmFunc = std::function<void(int32_t p0, int32_t p1)>;
-using KVSeqAddFunc = std::function<void(int32_t p0, int32_t p1, int32_t delta)>;
+using KVSeqRmFunc = std::function<bool(int32_t p0, int32_t p1)>;
+using KVSeqAddFunc = std::function<bool(int32_t p0, int32_t p1, int32_t delta)>;
 
 class KVSurgeon {
 public:
