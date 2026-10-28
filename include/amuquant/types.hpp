@@ -102,6 +102,10 @@ struct AMUQuantConfig {
     double weight_latency_cost{0.25};   // Penalty weight for adaptation execution overhead (lambda_lat)
     double weight_quality_loss{0.35};   // Penalty weight for context reduction (lambda_qual)
     double risk_oom_penalty{10.0};      // Critical penalty scale for projected physical OOM
+
+    // Proactive working-set budget constraint (O(1) memory bound)
+    uint32_t target_working_set_tokens{0};    // Target active KV cache slot bound (0 = disabled, > 0 = enforced bound)
+    double weight_working_set_penalty{0.20};  // Penalty scale for exceeding target working-set budget
 };
 
 struct SearchResult {

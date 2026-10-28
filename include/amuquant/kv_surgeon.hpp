@@ -27,6 +27,10 @@ struct KVSurgeryStats {
     uint32_t archived_chunks{0};
     int32_t current_rope_shift{0};
     uint64_t kv_memory_bytes{0};
+    double last_surgery_latency_us{0.0};
+    double total_surgery_latency_us{0.0};
+    uint64_t total_surgery_count{0};
+    double avg_surgery_latency_us{0.0};
 };
 
 /**
@@ -137,6 +141,9 @@ private:
     int32_t cumulative_rope_shift_{0};
     TokenIndexMap token_map_;
     KVEvictionCallback eviction_cb_;
+    double last_surgery_latency_us_{0.0};
+    double total_surgery_latency_us_{0.0};
+    uint64_t total_surgery_count_{0};
 };
 
 } // namespace amuquant

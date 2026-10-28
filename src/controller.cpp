@@ -155,7 +155,30 @@ double AMUQuantController::evaluate_action_cost(
         }
     }
 
+    // Proactive working-set budget constraint:
+    // If target_working_set_tokens is configured (> 0), penalize regimes retaining
+    // excessive physical KV slots beyond the target working set.
+    double working_set_bloat_penalty = 0.0;
+    if (config_.target_working_set_tokens > 0) {
+        uint32_t retained_slots = current_seq_len;
+        if (candidate_regime == Regime::REGIME_2_BALANCED_OFFLOAD) {
+            uint32_t sink = config_.attention_sink_tokens;
+            uint32_t win = config_.recent_window_tokens;
+            retained_slots = std::min(current_seq_len, sink + win);
+        } else if (candidate_regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL) {
+            uint32_t sink = config_.attention_sink_tokens;
+            uint32_t win = config_.min_recent_window_tokens;
+            retained_slots = std::min(current_seq_len, sink + win);
+        }
+
+        if (retained_slots > config_.target_working_set_tokens) {
+            double excess = static_cast<double>(retained_slots - config_.target_working_set_tokens);
+            working_set_bloat_penalty = config_.weight_working_set_penalty * (excess / static_cast<double>(config_.target_working_set_tokens));
+        }
+    }
+
     double J = oom_risk + 
+               working_set_bloat_penalty +
                (config_.weight_latency_cost * latency_cost) + 
                (config_.weight_quality_loss * quality_loss);
     return J;
@@ -251,7 +274,11 @@ StepDecision AMUQuantController::on_token_step(
         );
         decision.selected_utility_cost = optimal_utility;
     } else if (config_.policy == ArbitrationPolicy::STATIC_KV_ONLY) {
-        if (current_seq_len > config_.attention_sink_tokens + config_.recent_window_tokens) {
+        uint32_t trigger_limit = config_.attention_sink_tokens + config_.recent_window_tokens;
+        if (config_.target_working_set_tokens > 0 && config_.target_working_set_tokens < trigger_limit) {
+            trigger_limit = config_.target_working_set_tokens;
+        }
+        if (current_seq_len > trigger_limit) {
             target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
         } else {
             target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
@@ -321,10 +348,17 @@ void AMUQuantController::apply_regime_transition(
             decision.aggressive_evict = true;
 
             if (kv_surgeon_) {
+                uint32_t eff_window = config_.recent_window_tokens;
+                if (config_.target_working_set_tokens > config_.attention_sink_tokens) {
+                    uint32_t budget_window = config_.target_working_set_tokens - config_.attention_sink_tokens;
+                    if (budget_window < eff_window) {
+                        eff_window = budget_window;
+                    }
+                }
                 auto range = kv_surgeon_->plan_eviction(
                     current_seq_len,
                     config_.attention_sink_tokens,
-                    config_.recent_window_tokens,
+                    eff_window,
                     config_.min_eviction_batch
                 );
                 if (range.valid()) {

@@ -216,6 +216,47 @@ int main() {
                   << controller.get_adaptive_calibration_factor() << ": OK" << std::endl;
     }
 
+    // 4. Test Proactive Working-Set Budgeting & Surgery Latency Profiling
+    {
+        std::cout << "[TEST] Starting Proactive Working-Set Budgeting & Micro-Latency Profiling..." << std::endl;
+        AMUQuantConfig cfg;
+        cfg.policy = ArbitrationPolicy::PREDICTIVE_COST_BENEFIT;
+        cfg.target_working_set_tokens = 64; // Strict O(1) bound
+        cfg.attention_sink_tokens = 16;
+        cfg.recent_window_tokens = 48;
+        cfg.min_eviction_batch = 8;
+        cfg.eval_interval_tokens = 1;
+
+        auto telemetry = std::make_shared<SystemTelemetry>();
+        telemetry->set_mock_mode(true);
+        auto layer_mgr = std::make_shared<LayerManager>();
+        auto kv_surgeon = std::make_shared<KVSurgeon>();
+
+        AMUQuantController controller(cfg, telemetry, layer_mgr, kv_surgeon);
+
+        auto seq_rm = [](int32_t, int32_t) -> bool { return true; };
+        auto seq_add = [](int32_t, int32_t, int32_t) -> bool { return true; };
+
+        // Even with huge available RAM (12 GB available out of 16 GB),
+        // exceeding target_working_set_tokens triggers proactive Regime 2 pruning
+        MemoryStats s{};
+        s.timestamp_sec = 100.0;
+        s.total_ram_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+        s.process_rss_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+        s.available_ram_bytes = 12ULL * 1024ULL * 1024ULL * 1024ULL;
+        telemetry->set_mock_stats(s);
+
+        StepDecision dec = controller.on_token_step(0, 150, seq_rm, seq_add);
+        assert(dec.regime == Regime::REGIME_2_BALANCED_OFFLOAD);
+        assert(dec.kv_pruned);
+
+        auto surgeon_stats = kv_surgeon->get_stats(36, 8, 128);
+        assert(surgeon_stats.total_surgery_count > 0);
+        assert(surgeon_stats.last_surgery_latency_us >= 0.0);
+        std::cout << "  - Proactive Working-Set Budgeting: Target = 64 slots, Sequence = 150 -> Pruned to Regime 2: OK" << std::endl;
+        std::cout << "  - Micro-Latency Profiling: Surgery Latency = " << surgeon_stats.last_surgery_latency_us << " us: OK" << std::endl;
+    }
+
     std::cout << "[PASS] All AMUQuantController Policy Validations Succeeded.\n" << std::endl;
     return 0;
 }

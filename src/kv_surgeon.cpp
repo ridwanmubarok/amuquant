@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <vector>
+#include <chrono>
 
 namespace amuquant {
 
@@ -29,6 +30,8 @@ bool KVSurgeon::execute_eviction(
     if (!range.valid()) {
         return false;
     }
+
+    auto t_start = std::chrono::high_resolution_clock::now();
 
     // Auto-populate token map if caller hasn't explicitly initialized it
     if (token_map_.physical_size() < static_cast<size_t>(range.p_end)) {
@@ -88,6 +91,12 @@ bool KVSurgeon::execute_eviction(
 
     cumulative_rope_shift_ += shift_delta;
     total_pruned_tokens_ += static_cast<uint32_t>(count);
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    last_surgery_latency_us_ = std::chrono::duration<double, std::micro>(t_end - t_start).count();
+    total_surgery_latency_us_ += last_surgery_latency_us_;
+    total_surgery_count_++;
+
     return true;
 }
 
@@ -102,6 +111,11 @@ KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint
     size_t bytes_per_token = 2ULL * num_layers * kv_heads * head_dim * bytes_per_element;
     stats.kv_memory_bytes = stats.active_kv_tokens * bytes_per_token;
 
+    stats.last_surgery_latency_us = last_surgery_latency_us_;
+    stats.total_surgery_latency_us = total_surgery_latency_us_;
+    stats.total_surgery_count = total_surgery_count_;
+    stats.avg_surgery_latency_us = (total_surgery_count_ > 0) ? (total_surgery_latency_us_ / total_surgery_count_) : 0.0;
+
     return stats;
 }
 
@@ -109,6 +123,9 @@ void KVSurgeon::reset() {
     active_tokens_ = 0;
     total_pruned_tokens_ = 0;
     cumulative_rope_shift_ = 0;
+    last_surgery_latency_us_ = 0.0;
+    total_surgery_latency_us_ = 0.0;
+    total_surgery_count_ = 0;
     token_map_.reset();
 }
 
