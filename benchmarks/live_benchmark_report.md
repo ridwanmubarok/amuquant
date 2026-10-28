@@ -17,12 +17,12 @@
 | **Total Ingested Tool Tokens** | 649 tokens | 649 tokens | **649 tokens** |
 | **Total Generated Agent Tokens** | 256 tokens | 256 tokens | **256 tokens** |
 | **Cumulative Context Horizon** | 905 tokens | 905 tokens | **905 tokens** |
-| **Execution Throughput** | 19.9 tok/s | 0.35 tok/s (Disk I/O Bound) | **19.5 tok/s (~56x Speedup)** |
-| **Total 256-Token Latency** | 12.9 s | 731.4 s (~12.2 min) | **13.1 s (Real-Time Interactive)** |
+| **Execution Throughput** | 15.9 tok/s | 0.35 tok/s (Disk I/O Bound) | **14.6 tok/s (~42x Speedup)** |
+| **Total 256-Token Latency** | 16.2 s | 731.4 s (~12.2 min) | **17.6 s (Real-Time Interactive)** |
 | **Final Physical KV Cache Slots** | 905 slots (Unbounded $O(N)$) | $O(1)$ Weight Swapping | **109 slots (Strictly Bounded $O(1)$)** |
 | **Physical KV Memory Reclaimed** | 0 KB | N/A (Weight Swapping) | **28656 KB** |
 | **Tokens Pruned via Attention Window** | 0 tokens | 0 tokens | **796 tokens** |
-| **Micro-Latency per Surgery Event** | N/A | N/A | **102.69 us (~0.10 ms)** |
+| **Micro-Latency per Surgery Event** | N/A | N/A | **98.18 us (~0.10 ms)** |
 | **Turn 6 Host RAM Shock Resilience** | Vulnerable to OOM Thrashing | High Latency Tolerant | **100% Anti-Crash Zero-OOM (Regime 3 Shift)** |
 
 ## 8. Scenario 8: Analytical Mathematical Projection of Scaling (Extrapolated from the Empirical 66-Slot Clamp in Scenarios 6 & 7)

@@ -6,11 +6,11 @@
 
 | Metric | Unmanaged Baseline | AMU-QUANT Co-Adaptive Engine |
 | :--- | :--- | :--- |
-| **Tokens Processed** | 96 tokens | 96 tokens |
-| **Peak KV-Cache Memory** | 192 KB | 80 KB |
-| **Final KV-Cache Memory** | 192 KB | 38 KB |
-| **Physical RAM Reclaimed** | 0 KB | 154 KB |
-| **Tokens Pruned via Window** | 0 tokens | 77 tokens |
+| **Tokens Processed** | 128 tokens | 128 tokens |
+| **Peak KV-Cache Memory** | 256 KB | 80 KB |
+| **Final KV-Cache Memory** | 256 KB | 38 KB |
+| **Physical RAM Reclaimed** | 0 KB | 218 KB |
+| **Tokens Pruned via Window** | 0 tokens | 109 tokens |
 | **KV Complexity Bound** | O(N) Linear Growth | O(1) Bounded Working Set |
 
 Generated automatically by `amuquant_benchmark`.
