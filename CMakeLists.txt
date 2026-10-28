@@ -46,6 +46,7 @@ set(AMUQUANT_SOURCES
     src/telemetry.cpp
     src/turboquant.cpp
     src/turbovec_ffi.cpp
+    src/canonical_history.cpp
     src/layer_manager.cpp
     src/kv_surgeon.cpp
     src/controller.cpp

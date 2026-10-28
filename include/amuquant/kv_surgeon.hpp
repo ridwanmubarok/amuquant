@@ -100,6 +100,7 @@ private:
 using KVVectorExtractor = std::function<const float*(int32_t token_pos)>;
 using KVSeqRmFunc = std::function<bool(int32_t p0, int32_t p1)>;
 using KVSeqAddFunc = std::function<bool(int32_t p0, int32_t p1, int32_t delta)>;
+using KVEvictionCallback = std::function<void(const std::vector<uint64_t>& evicted_logical_ids)>;
 
 class KVSurgeon {
 public:
@@ -137,6 +138,8 @@ public:
     TokenIndexMap& get_token_map() { return token_map_; }
     const TokenIndexMap& get_token_map() const { return token_map_; }
 
+    void set_eviction_callback(KVEvictionCallback cb) { eviction_cb_ = std::move(cb); }
+
     void reset();
 
 private:
@@ -147,6 +150,7 @@ private:
     int32_t cumulative_rope_shift_{0};
     TokenIndexMap token_map_;
     std::unique_ptr<AsyncArchiver> async_archiver_;
+    KVEvictionCallback eviction_cb_;
 };
 
 } // namespace amuquant

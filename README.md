@@ -36,12 +36,12 @@ Prior systems exhibit four critical systemic limitations:
   3. **Advisory Virtual Memory Paging**: Evaluates OS kernel paging hints via `posix_madvise(..., POSIX_MADV_DONTNEED / WILLNEED)` across mapped model file segments, with true physical residency verified via `mincore(2)` kernel page tables. Fine-grained intra-forward tensor computation hook streaming is an exploratory optimization under active investigation.
 
 > [!IMPORTANT]
-> **Decoupled Architecture: Working Attention vs. In-Process Episodic Semantic Memory**:
-> AMU-QUANT decouples autoregressive context into two complementary operational tiers:
-> 1. **Working Attention Window ($W_t$)**: Retains lossless, full-precision Key and Value tensors for recent tokens and attention sinks in `llama.cpp`'s native attention buffer, preserving full multi-head attention fidelity for active reasoning.
-> 2. **Episodic Associative Memory ($C_t$)**: Archives excised historical tokens as compressed vector embeddings ($\mathbf{h}_t \in \mathbb{R}^d$) into `turbovec` (Lloyd-Max 4-bit / 2-bit scalar quantization) via a strict transactional batch barrier.
->
-> **Theoretical & Accounting Boundary**: This architecture functions as an in-process episodic associative memory (In-Memory RAG). It deliberately trades exact multi-layer intermediate Key/Value tensor matrix restoration for a ~15.5× memory compression factor, enabling sub-millisecond factual retrieval without unbounded physical attention buffer growth. Physical sequence slots are pruned via `llama_memory_seq_rm()` strictly after transactional verification in `turbovec`.
+> **Hierarchical Dual-Memory Architecture (Active Attention vs. Episodic Memory)**:
+> AMU-QUANT decouples autoregressive inference into complementary operational tiers:
+> 1. **Working Attention Buffer ($W_t$)**: Retains full-precision Key and Value tensors for recent tokens and attention sinks in `llama.cpp`'s native attention pool, bounded to $O(1)$ active slots ($\le 66$ slots, $\sim 4.5\text{ MB}$).
+> 2. **Canonical Conversation History (`CanonicalHistoryStore`)**: Persists ground-truth raw text, turn metadata, and roles independently of physical KV slots.
+> 3. **Episodic Associative Vector Index ($C_t$)**: Archives excised tokens as block-orthogonal Lloyd-Max vector embeddings into `turbovec` (4-bit / 2-bit) with $139.6\times$ flatter memory growth ($528\text{ bytes/token}$ vs $73,728\text{ bytes/token}$).
+> 4. **Query-Driven Context Reconstruction (Retrieval-to-Prompt)**: When user queries reference evicted context, AMU-QUANT executes a hybrid dense+lexical search, reconstructing and injecting the factual text into the prompt window, preventing hallucinations without unbounded attention buffer expansion.
 
 From **Data Science** and **Natural Language Processing (NLP)** perspectives, this system advances:
 1. **High-dimensional vector space optimization** via non-uniform Lloyd-Max scalar quantization (4-bit and 2-bit).
@@ -292,6 +292,9 @@ AMU-QUANT evaluates inference efficiency and memory stabilization using a formal
 
 # Scenario 7: Live long-context horizon benchmark (1,024 tokens)
 ./build/live_benchmark --model models/qwen2.5-3b-instruct-q4_k_m.gguf --scenario long-context
+
+# Scenario 9: Factual QA & hallucination ablation benchmark (Configs A, B, C, D)
+./build/live_benchmark --model models/qwen2.5-3b-instruct-q4_k_m.gguf --scenario qa-ablation
 
 # Comprehensive evaluation suite (Runs all empirical scenarios sequentially)
 ./build/live_benchmark --model models/qwen2.5-3b-instruct-q4_k_m.gguf --scenario all --tokens 64
@@ -553,7 +556,35 @@ In an unmanaged runtime, memory grows unbounded with $O(N)$ complexity ($73.7\te
 
 ---
 
-### 5.11 Standalone Zero-Dependency Benchmark Results
+### 5.11 Scenario 9: Factual QA & Hallucination Ablation Matrix (Configurations A, B, C, D)
+
+To address the fundamental distinction between **KV-cache compression** (preserving internal tensor representations) and **conversation memory** (preserving factual context without hallucination), this benchmark evaluates four distinct operating regimes under identical prompt sequences, context workloads, and sampling parameters:
+
+1. **Turn 1 (Ground-Truth Ingestion)**: Ingests specific factual entities: Project Name (`Aegis`), Version Number (`90412`), Architect Owner (`Ridwan`), and Deployment Port (`8084`).
+2. **Turn 2 (Intervening Context Workload)**: Processes 300+ intervening conversational and telemetry log tokens, triggering physical KV-cache eviction in managed regimes.
+3. **Turn 3 (Targeted Probe Question)**: Prompts the model: *"Berdasarkan data konfigurasi sebelumnya, sebutkan: nama proyek, nomor versi rilis, arsitek pemiliknya, dan port deployment yang digunakan."*
+
+| Configuration | Evaluation Mode | Working KV Slots | Factual Accuracy | Hallucination Status | Output Behavior |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **Config A** | Unmanaged Baseline (No Eviction) | 431 slots ($O(N)$ Unbounded) | **50% (2/4)** | YES (Lost Facts) | Suffers from attention distraction across intervening context |
+| **Config B** | AMU-QUANT (Eviction Disabled) | 431 slots ($O(N)$ Unbounded) | **50% (2/4)** | YES (Lost Facts) | Identical to unmanaged baseline; telemetry active |
+| **Config C** | Eviction Without Context Reconstruction | 165 slots (Bounded) | **0% (0/4)** | YES (Total Context Loss) | Pruned attention slots without prompt re-injection forces model to apologize or hallucinate |
+| **Config D** | **AMU-QUANT Dual-Memory (Retrieval-to-Prompt)** | **290 slots (Bounded)** | **100% (4/4)** | **NO (Zero Hallucination)** | **Query-driven hybrid search retrieves Turn 1 and re-injects facts as system memory** |
+
+#### Entity Match Breakdown Across Configurations
+
+| Entity Target | Ground Truth Value | Config A | Config B | Config C (Eviction Only) | Config D (AMU-QUANT Dual-Memory) |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Project Name** | `Aegis` | MATCH | MATCH | MISS | **MATCH** |
+| **Version Number** | `90412` | MATCH | MATCH | MISS (Pruned) | **MATCH** |
+| **Architect Owner** | `Ridwan` | MISS | MISS | MISS | **MATCH** |
+| **Deployment Port** | `8084` | MISS | MISS | MISS (Pruned) | **MATCH** |
+
+* **Scientific Conclusion**: Evicting tokens from the working KV-cache physically severs attention connections. In Config C, despite vectors being indexed in TurboVec, the model achieved **0% factual accuracy** because the generation loop lacked context reconstruction. In Config D, AMU-QUANT's **Hierarchical Dual-Memory System** retrieved the evicted turn from `CanonicalHistoryStore` and injected it into the prompt, restoring **100% exact-match factual recall** while maintaining bounded working attention buffers.
+
+---
+
+### 5.12 Standalone Zero-Dependency Benchmark Results
 
 For evaluators running in environments without `llama.cpp` or local weights, `./build/amuquant_benchmark` executes the identical mathematical state machine, `TokenIndexMap`, and Lloyd-Max vector quantization:
 

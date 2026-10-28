@@ -334,6 +334,10 @@ int main() {
     auto null_extractor = [](int32_t) -> const float* { return nullptr; };
     auto kv_surgeon = engine.get_kv_surgeon();
     
+    // Record canonical conversation turns in history store
+    engine.record_turn("user", "Nama proyeknya Aegis, nomor versinya 90412, pemiliknya Ridwan, port 8084.", 0, 15);
+    engine.record_turn("assistant", "Baik, konfigurasi proyek Aegis versi 90412 telah dicatat.", 15, 25);
+
     // Simulate initial sequence growth up to 40 tokens
     for (uint32_t t = 0; t < 40; ++t) {
         kv_cache.append_token();
@@ -416,6 +420,27 @@ int main() {
     assert(recall_hits[0].score > 0.80f);
     std::cout << "  - Needle-in-a-Haystack Retrieval: Chunk ID " << recall_hits[0].id 
               << " recovered with Cosine Score " << recall_hits[0].score << " (Recall@1 = 100%): OK" << std::endl;
+
+    // 5b. Test Canonical History & Query-Driven Hybrid Retrieval-to-Prompt
+    auto history = engine.get_history_store();
+    assert(history != nullptr);
+    assert(history->size() >= 2);
+    const HistoryTurn* turn0 = history->get_turn(0);
+    assert(turn0 != nullptr);
+    assert(turn0->is_evicted_from_kv == true); // Must be marked evicted because token range 0..15 had active slots pruned
+
+    // Query with new factual question
+    auto memories = engine.query_hybrid_memory("Siapa pemilik proyek Aegis dan berapa nomor versinya?", context_tokens[NEEDLE_POS].data(), 3);
+    assert(!memories.empty());
+    assert(memories[0].content.find("Aegis") != std::string::npos);
+    assert(memories[0].content.find("90412") != std::string::npos);
+    assert(memories[0].content.find("Ridwan") != std::string::npos);
+
+    std::string prompt_injection = engine.reconstruct_memory_prompt("Berapa port proyek Aegis?", context_tokens[NEEDLE_POS].data(), 3);
+    assert(prompt_injection.find("8084") != std::string::npos);
+    assert(prompt_injection.find("Memori Percakapan Terkait") != std::string::npos);
+    std::cout << "  - Query-Driven Hybrid Retrieval & Prompt Reconstruction: Turn 0 recovered ('" 
+              << memories[0].content << "') | Score: " << memories[0].combined_score << ": OK" << std::endl;
 
     // 6. Clean up physical mmap layers
     for (uint32_t l = 0; l < cfg.num_layers; ++l) {

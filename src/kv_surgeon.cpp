@@ -322,6 +322,10 @@ bool KVSurgeon::execute_eviction(
     // 3. Update physical-to-logical translation table (preserves logical ID invariant)
     token_map_.prune_range(range.p_start, range.p_end);
 
+    if (eviction_cb_) {
+        eviction_cb_(logical_ids);
+    }
+
     total_archived_tokens_ += static_cast<uint32_t>(count);
     cumulative_rope_shift_ += shift_delta;
     return true;

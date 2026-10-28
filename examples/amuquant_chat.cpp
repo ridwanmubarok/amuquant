@@ -369,6 +369,9 @@ int main(int argc, char** argv) {
             total_rope_shift = 0;
             session_embeddings.clear();
             engine.get_controller()->reset();
+            if (engine.get_history_store()) {
+                engine.get_history_store()->clear();
+            }
             std::cout << ANSI_GRAY << "Riwayat percakapan dan KV-cache telah dibersihkan.\n" << ANSI_RESET;
             continue;
         } else if (user_input == "/help") {
@@ -381,12 +384,24 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // 4b. Query-driven hybrid context reconstruction
+        std::string memory_block = engine.reconstruct_memory_prompt(user_input, nullptr, 2);
+        if (!memory_block.empty()) {
+            std::cout << ANSI_YELLOW << "[AMU-QUANT: Mengambil kembali konteks memori historis yang telah dievikuasi]" << ANSI_RESET << "\n";
+        }
+
         // 5. Format prompt according to model architecture (Llama-3 or Qwen ChatML)
         std::string user_prompt;
         if (is_llama) {
-            user_prompt = "<|start_header_id|>user<|end_header_id|>\n\n" + user_input + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+            if (!memory_block.empty()) {
+                user_prompt = "<|start_header_id|>system<|end_header_id|>\n\n" + memory_block + "<|eot_id|>";
+            }
+            user_prompt += "<|start_header_id|>user<|end_header_id|>\n\n" + user_input + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
         } else {
-            user_prompt = "<|im_start|>user\n" + user_input + "<|im_end|>\n<|im_start|>assistant\n";
+            if (!memory_block.empty()) {
+                user_prompt = "<|im_start|>system\n" + memory_block + "<|im_end|>\n";
+            }
+            user_prompt += "<|im_start|>user\n" + user_input + "<|im_end|>\n<|im_start|>assistant\n";
         }
         std::vector<llama_token> prompt_tokens(user_prompt.size() + 16);
         int n_tokens = llama_tokenize(vocab, user_prompt.c_str(), user_prompt.size(), prompt_tokens.data(), prompt_tokens.size(), false, true);
@@ -394,6 +409,8 @@ int main(int argc, char** argv) {
         if (n_tokens <= 0) {
             continue;
         }
+
+        int32_t prompt_tok_start = n_past;
 
         // Decode batch prompt input
         llama_pos cur_max_pos = llama_memory_seq_pos_max(mem, 0);
@@ -420,12 +437,17 @@ int main(int argc, char** argv) {
             session_embeddings.append(embd);
         }
         n_past += n_tokens;
+        int32_t prompt_tok_end = n_past;
+
+        // Record user turn into canonical history
+        engine.record_turn("user", user_input, prompt_tok_start, prompt_tok_end);
 
         // 6. Autoregressive streaming token generation loop
         std::cout << ANSI_BOLD << ANSI_CYAN << "assistant> " << ANSI_RESET;
 
         auto t_start = std::chrono::steady_clock::now();
         uint32_t generated_tokens = 0;
+        std::string assistant_response;
 
         for (int step = 0; step < 512; ++step) {
             // Sample next token from logits distribution
@@ -441,7 +463,9 @@ int main(int argc, char** argv) {
             char piece_buf[128];
             int piece_len = llama_token_to_piece(vocab, new_token_id, piece_buf, sizeof(piece_buf), 0, true);
             if (piece_len > 0) {
-                std::cout << std::string(piece_buf, piece_len) << std::flush;
+                std::string piece_str(piece_buf, piece_len);
+                std::cout << piece_str << std::flush;
+                assistant_response += piece_str;
             }
 
             // Register newly decoded logical token
@@ -475,6 +499,9 @@ int main(int argc, char** argv) {
             generated_tokens++;
         }
         std::cout << "\n";
+
+        // Record assistant response into canonical history
+        engine.record_turn("assistant", assistant_response, prompt_tok_end, n_past);
 
         auto t_end = std::chrono::steady_clock::now();
         double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();

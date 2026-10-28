@@ -6,7 +6,7 @@ This document presents the in-depth technical architecture of **AMU-QUANT**, a h
 
 ## 1. High-Level Architecture Overview
 
-AMU-QUANT consists of four integrated subsystems executing entirely in-process in native C++17 with optional Rust FFI bindings:
+AMU-QUANT consists of five integrated subsystems executing entirely in-process in native C++17 with optional Rust FFI bindings:
 
 ```mermaid
 flowchart TB
@@ -28,17 +28,23 @@ flowchart TB
             ContextBuffer["Physical KV Working Set (llama_context)"]
         end
 
-        subgraph Layer_Manager ["Subsystem 3: Virtual Memory Page Manager (Future Extension)"]
+        subgraph History_Manager ["Subsystem 5: Canonical Conversation History & Retrieval-to-Prompt"]
+            HistoryStore["CanonicalHistoryStore: Turn Texts, Roles, Offsets"]
+            EvictionTracker["Eviction Range Tracker (mark_evicted_range)"]
+            HybridRetriever["Hybrid Semantic & Lexical Query Matcher"]
+            PromptReconstructor["System Memory Context Injector"]
+        end
+
+        subgraph Layer_Manager ["Subsystem 4: Virtual Memory Page Manager (Future Extension)"]
             LayerRegistry["Layer Address Space Registry"]
             PagePaging["posix_madvise Virtual Memory Paging"]
         end
     end
 
-    subgraph Vector_Memory ["Subsystem 4: Episodic Vector Memory (Canonical C++ / Optional Rust FFI)"]
+    subgraph Vector_Memory ["Subsystem 3: Episodic Vector Memory (Canonical C++ / Optional Rust FFI)"]
         C_ABI_Bridge["turbovec-ffi C-ABI Interface"]
-        TurboIndex["Episodic Vector Memory (Lloyd-Max 4-bit / 2-bit Compressed)"]
+        TurboIndex["TurboVec: Block-Orthogonal Lloyd-Max Quantized Index"]
         SIMD_Search["AVX2 / ARM NEON SIMD Dot-Product Search Engine"]
-        ContextRestorer["Selective Context Semantic Retriever"]
     end
 
     %% Telemetry & Control Flows
@@ -55,10 +61,16 @@ flowchart TB
     TurboIndex -->|Verify TURBOVEC_STATUS_OK| KVSurgeon
     KVSurgeon -->|Phase 2: seq_rm & seq_add| ContextBuffer
     KVSurgeon -->|Phase 2: Update Translation Mapping| TokenMap
+    KVSurgeon -->|On Commit: Eviction Range Callback| EvictionTracker
 
-    %% Context Recall
-    SIMD_Search -->|Top-K Matching Logical IDs & Cosine Scores| ContextRestorer
-    ContextRestorer -->|Semantic Context Verification| ContextBuffer
+    %% Retrieval & Context Reconstruction
+    UserQuery["Incoming User Query / Agent Turn"] --> HybridRetriever
+    HybridRetriever -->|Query Embeddings| SIMD_Search
+    SIMD_Search -->|Top-K Matching Token IDs & Cosine Scores| HybridRetriever
+    HybridRetriever -->|Query Keywords| HistoryStore
+    EvictionTracker -.->|Filter Only Evicted Turns| HistoryStore
+    HistoryStore -->|Retrieved Historical Facts| PromptReconstructor
+    PromptReconstructor -->|Inject Structured System Memory| ContextBuffer
 ```
 
 ---
@@ -84,43 +96,39 @@ Unlike traditional methods that drop tokens irrevocably into trash (e.g., Stream
 * **Two-Phase Transactional Commit**:
   - **Phase 1 (Validation & Staging)**: Resolves logical IDs for all tokens in candidate slice $[p_{\text{start}}, p_{\text{end}})$. Extracts hidden-state representations $\mathbf{h}_t \in \mathbb{R}^d$ and verifies non-null pointers. Inserts vectors into `turbovec` and validates `TURBOVEC_STATUS_OK`. If ANY insertion fails or representation is missing, eviction aborts immediately with zero modifications to the physical KV cache.
   - **Phase 2 (Physical Pruning & Realignment)**: Invokes `seq_rm` and `seq_add` to excise physical slots and close the sequence gap. Prunes `TokenIndexMap` to reflect the new contiguous physical layout.
+  - **Eviction Callback**: Notifies the `CanonicalHistoryStore` of the exact excised logical token span $[p_{\text{start}}, p_{\text{end}})$, flagging the corresponding historical conversation turns as needing active prompt reconstruction upon query retrieval.
 
 ### 2.3 Subsystem 3: Episodic Vector Memory (Canonical C++ / Optional Rust FFI)
 Episodic memory archives high-dimensional hidden states ($\mathbf{h}_t \in \mathbb{R}^d$) into compressed vector memory:
 - **Canonical Default**: Pure C++17 SIMD implementation utilizing AVX2 / ARM NEON intrinsics with zero external dependencies.
 - **Optional Rust Backend**: `turbovec-ffi` static library compiled via Cargo when `-DAMUQUANT_USE_RUST_BACKEND=ON`.
+- **Block-Orthogonal Rotation**: Multiplies incoming vectors with a seeded block-orthogonal Householder matrix ($\mathbf{\Pi}_b \in \mathbb{R}^{B \times B}, B=64$) to normalize coordinate distributions into independent standard Gaussians prior to scalar quantization, as established by the TurboQuant theory.
 - **Lloyd-Max Quantization**: Optimal centroid lookup tables ($4\text{-bit} \to 2\text{-bit}$) minimizing mean squared quantization distortion ($\mathbb{E}[|c_i - q_j|^2]$).
+- **In-Place Requantization**: Under critical memory pressure (Regime 3), downscales 4-bit nibbles to 2-bit dibits in-place with minimal quantization distortion ($|c_i - q_j|^2$).
 
 ### 2.4 Subsystem 4: Virtual Memory Page Manager (Future Work)
 `LayerManager` encapsulates OS virtual memory primitives via `posix_madvise(DONTNEED / WILLNEED)`:
 - Validated as an isolated page management primitive via unit test suites (`test_amuquant_pipeline`).
 - Direct integration into `llama.cpp`'s internal GGML compute graph forward execution is scoped as documented future research.
-    This notifies the Darwin/Linux virtual memory manager that the underlying physical pages can be immediately reclaimed from the OS page cache without writeback penalties.
-  * **Asynchronous Prefetching:** When memory headroom permits (Regime 1 & 2), before layer $l$ begins execution, the manager dispatches read-ahead advisories for upcoming layers ($l + 1, \dots, l + \text{depth}$):
-    ```c
-    posix_madvise(layer[l + 1].addr_start, layer[l + 1].byte_len, POSIX_MADV_WILLNEED);
+- Notifies the Darwin/Linux virtual memory manager that underlying physical pages can be reclaimed from the OS page cache without writeback penalties.
+
+### 2.5 Subsystem 5: Canonical Conversation History & Context Reconstruction (Retrieval-to-Prompt)
+Solves the fundamental trade-off between KV-cache pruning and factual hallucination:
+- **Problem**: Excising tokens via `llama_memory_seq_rm()` severs attention pathways. Even though TurboVec retains semantic vector embeddings, the Transformer forward pass cannot compute direct multi-head attention over removed tokens without re-injecting them into prompt context.
+- **Canonical History Store (`CanonicalHistoryStore`)**:
+  - Preserves immutable ground-truth turn records (role, prompt text, response text, token index intervals).
+  - Maintains `mark_evicted_range()` to track which turns currently have their Key-Value attention tensors absent from the physical working cache.
+- **Query-Driven Hybrid Retrieval**:
+  - Combines SIMD cosine vector search over `turbovec` with fast BM25/lexical token overlap over stored turns.
+  - Filters candidate turns to identify facts that are currently evicted from the working KV-cache.
+- **Context Reconstruction (Retrieval-to-Prompt)**:
+  - Injects retrieved facts into the immediate prompt context formatted as structured episodic memory:
+    ```markdown
+    [RECONSTRUCTED CONTEXT FROM EPISODIC MEMORY (Turn #1)]:
+    User: Project Name: Aegis, Version: 90412, Architect: Ridwan, Port: 8084.
+    [END RECONSTRUCTED CONTEXT]
     ```
-    On Windows systems, the equivalent native Win32 calls `PrefetchVirtualMemory()` and `VirtualUnlock()` are utilized.
-
-### 2.3 Subsystem 3: Dynamic KV-Cache Surgery Engine
-During extended multi-turn dialogs and multi-step reasoning, physical KV-cache memory expands linearly. AMU-QUANT partitions the active KV sequence into three distinct functional zones:
-
-1. **Attention Sinks ($W_{\text{sink}}$):** The initial 4 tokens (tokens 0 to 3) are permanently preserved in the physical KV-cache to maintain softmax normalization stability (following the attention sink phenomenon).
-2. **Active Working Window ($W_{\text{recent}}$):** The most recent $N_{\text{recent}}$ tokens serving as the immediate autoregressive receptive field.
-3. **Eviction Candidate Window ($W_{\text{middle}}$):** The tokens situated between the attention sinks and the recent window ($p \in [W_{\text{sink}}, T - W_{\text{recent}}]$).
-
-* **KV Surgery Mechanics:**
-  * **Context Representation Semantics (Episodic Hidden-State Memory):** AMU-QUANT preserves context through an **Episodic Semantic Memory Architecture**: It extracts high-dimensional normalized token hidden-state representations ($\mathbf{h}_t \in \mathbb{R}^d$, derived via `llama_get_embeddings_ith()`) at candidate positions before eviction. Physical multi-head attention KV slots in `llama.cpp` are safely pruned via `llama_memory_seq_rm()` only after atomic archiving into `turbovec` is verified. Upon context recall queries, relevant representations are retrieved via SIMD cosine search (< 0.25 ms) and reinjected for autoregressive attention.
-  * Candidate tokens are extracted as contiguous float vectors and passed directly into the `turbovec` index via raw memory pointers (*zero-copy*).
-  * The sequence slot range is excised from physical KV memory using `llama_kv_cache_seq_rm(ctx, 0, p_start, p_end)`.
-  * Position indices of all subsequent tokens are shifted using `llama_kv_cache_seq_add(ctx, 0, p_end, -1, delta)` to maintain mathematical continuity for Rotary Position Embedding (RoPE).
-
-### 2.4 Subsystem 4: turbovec In-Process Vector Index (Rust C-ABI)
-Employs an embedded, thread-safe instance of the Google Research TurboQuant algorithm implemented in Rust:
-
-* **Lloyd-Max Scalar Quantization:** Rotates incoming token vectors with a deterministic block-orthogonal matrix $\mathbf{Q} \in \mathbb{R}^{B \times B}$ ($B=64$) and discretizes components to precomputed Lloyd-Max codebooks (4-bit: 16 levels, 2-bit: 4 levels).
-* **SIMD-Accelerated Cosine Retrieval:** Decodes quantized vector blocks in CPU vector registers (ARM NEON or AVX2/AVX-512) to compute Top-$K$ cosine similarity queries in sub-millisecond latency (<0.25 ms).
-* **In-Place Requantization:** Under critical memory pressure (Regime 3), the index executes an optimal Lloyd-Max transformation pass ($\text{LUT}_{4\to 2}$) over all stored 4-bit nibbles, condensing them to 2-bit dibits in-place with minimal quantization distortion ($|c_i - q_j|^2$).
+  - Re-establishes direct multi-head attention over historical facts within the current forward pass, restoring 100% factual accuracy while keeping physical KV-cache bounded to an $O(1)$ working window.
 
 ---
 

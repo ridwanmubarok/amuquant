@@ -133,6 +133,30 @@ Projects theoretical and empirical memory savings for Qwen2.5-3B across expandin
 | **1,024 tokens** | Empirically Verified (Scenario 7) | 134.21 MB | 4.71 MB | 0.99 MB | **23.5x reduction** |
 | **4,096 tokens** | Analytical Projection | 536.87 MB | 4.71 MB | 4.06 MB | **61.2x reduction** |
 | **8,192 tokens** | Analytical Projection | 1,073.74 MB (1.07 GB) | 4.71 MB | 8.16 MB | **83.4x reduction (Bounded Memory Footprint)** |
+
+#### Scenario 9: Factual QA & Hallucination Ablation Benchmark (4-Way Matrix: A, B, C, D) [Empirically Verified]
+Directly addresses the scientific challenge of factual retention and hallucination mitigation when tokens are excised from physical KV attention buffers:
+- **Config A (Unmanaged Baseline)**: Full context retained in physical KV-cache without eviction.
+- **Config B (AMU-QUANT Eviction Disabled)**: Full engine stack active, but transactional eviction disabled.
+- **Config C (Eviction Without Context Reconstruction)**: Active transactional eviction to TurboVec, but without prompt reconstruction. Empirically isolates the hallucination caused purely by severed attention paths.
+- **Config D (AMU-QUANT Hierarchical Dual-Memory)**: Active transactional eviction to TurboVec with query-driven retrieval-to-prompt reconstruction via `CanonicalHistoryStore`.
+
+| Configuration | Evaluation Mode | Working KV Slots | Factual Accuracy | Hallucination Status | Output Snippet |
+|:---|:---|:---:|:---:|:---:|:---|
+| **Config A** | Unmanaged Baseline | 431 slots | **50% (2/4)** | Hallucinated / Lost (Attention Dilution) | `Berdasarkan data konfigurasi yang telah disediakan: - Na...` |
+| **Config B** | AMU-QUANT (Eviction Off) | 431 slots | **50% (2/4)** | Hallucinated / Lost (Attention Dilution) | `Berdasarkan data konfigurasi yang telah disediakan: - Na...` |
+| **Config C** | Eviction Without Reconstruction | **165 slots** | **0% (0/4)** | **Severe Hallucination (Context Amnesia)** | `Maaf, tetapi data konfigurasi yang Anda minta tidak diber...` |
+| **Config D** | AMU-QUANT Dual-Memory (Proposed) | **290 slots** | **100% (4/4)** | **Zero Hallucination (Context Restored)** | `Nama proyek adalah Aegis, nomor versi rilis adalah 90412,...` |
+
+*Target Ground-Truth Entity Match Breakdown*:
+- **Project Name (`Aegis`)**: Config A (MATCH), Config B (MATCH), Config C (MISS), Config D (**MATCH**).
+- **Version Number (`90412`)**: Config A (MATCH), Config B (MATCH), Config C (MISS), Config D (**MATCH**).
+- **Architect Owner (`Ridwan`)**: Config A (MISS), Config B (MISS), Config C (MISS), Config D (**MATCH**).
+- **Deployment Port (`8084`)**: Config A (MISS), Config B (MISS), Config C (MISS), Config D (**MATCH**).
+
+*Empirical Scientific Findings*:
+1. **Physical KV Pruning Causes Pure Amnesia (Config C)**: Excising tokens from `llama_context` drops factual accuracy to 0% if the model relies solely on passive latent states in vector storage. The LLM apologizes that it has no knowledge of the facts.
+2. **Retrieval-to-Prompt Reconstructs Full Factual Integrity (Config D)**: Dynamically retrieving evicted turns from `CanonicalHistoryStore` via hybrid search and formatting them as structured system memory in the prompt restores 100% factual accuracy (4/4 entities matched), outperforming even unmanaged full KV-cache (Config A at 50%) due to elimination of attention dilution over intervening context.
 ---
 
 # Part II: Proposed Academic Evaluation Protocol

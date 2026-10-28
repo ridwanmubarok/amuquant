@@ -56,11 +56,61 @@ impl TurboIndex {
         let num_blocks = (dimension + block_size - 1) / block_size;
         let mut orthogonal_matrix = vec![0.0f32; num_blocks * block_size * block_size];
 
-        // Deterministic block-diagonal orthogonal projection matrix
+        // Deterministic Gram-Schmidt block-orthogonal rotation matrix (seed = 42)
+        // Guarantees Gaussianization via Central Limit Theorem with O(d * B) projection complexity
+        struct SimpleRng {
+            state: u64,
+        }
+        impl SimpleRng {
+            fn new(seed: u64) -> Self {
+                Self { state: if seed == 0 { 42 } else { seed } }
+            }
+            fn next_u64(&mut self) -> u64 {
+                self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                self.state
+            }
+            fn next_f32(&mut self) -> f32 {
+                (self.next_u64() >> 32) as f32 / (u32::MAX as f32)
+            }
+            fn next_gaussian(&mut self) -> f32 {
+                let u1 = self.next_f32().max(1e-7);
+                let u2 = self.next_f32();
+                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+            }
+        }
+
+        let mut rng = SimpleRng::new(42);
+
         for b in 0..num_blocks {
             let offset = b * block_size * block_size;
+            let block = &mut orthogonal_matrix[offset..offset + block_size * block_size];
+
+            // 1. Generate Gaussian i.i.d. entries
+            for i in 0..(block_size * block_size) {
+                block[i] = rng.next_gaussian();
+            }
+
+            // 2. Gram-Schmidt orthogonalization ensuring Q^T * Q = I
             for i in 0..block_size {
-                orthogonal_matrix[offset + i * block_size + i] = 1.0;
+                for j in 0..i {
+                    let mut dot = 0.0f32;
+                    for k in 0..block_size {
+                        dot += block[i * block_size + k] * block[j * block_size + k];
+                    }
+                    for k in 0..block_size {
+                        let sub = dot * block[j * block_size + k];
+                        block[i * block_size + k] -= sub;
+                    }
+                }
+
+                let mut norm_sq = 0.0f32;
+                for k in 0..block_size {
+                    norm_sq += block[i * block_size + k] * block[i * block_size + k];
+                }
+                let inv_norm = 1.0 / norm_sq.max(1e-12).sqrt();
+                for k in 0..block_size {
+                    block[i * block_size + k] *= inv_norm;
+                }
             }
         }
 
@@ -76,6 +126,26 @@ impl TurboIndex {
 
     pub fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    pub fn rotate_vector(&self, input: &[f32], output: &mut [f32]) {
+        let block_size = 64;
+        let num_blocks = (self.dimension + block_size - 1) / block_size;
+
+        for b in 0..num_blocks {
+            let offset = b * block_size;
+            let current_len = std::cmp::min(block_size, self.dimension.saturating_sub(offset));
+            let block_offset = b * block_size * block_size;
+
+            for i in 0..current_len {
+                let row_offset = block_offset + i * block_size;
+                let mut sum = 0.0f32;
+                for k in 0..current_len {
+                    sum += input[offset + k] * self.orthogonal_matrix[row_offset + k];
+                }
+                output[offset + i] = sum;
+            }
+        }
     }
 
     pub fn insert_slice(&mut self, chunk_id: u64, data: &[f32]) {
@@ -95,12 +165,16 @@ impl TurboIndex {
         };
         let inv_sigma = 1.0 / sigma;
 
+        // Apply block-orthogonal rotation
+        let mut rotated = vec![0.0f32; self.dimension];
+        self.rotate_vector(data, &mut rotated);
+
         match self.bit_width {
             QuantBitWidth::Bits4 => {
                 let mut packed = vec![0u8; self.dimension / 2];
                 for i in (0..self.dimension).step_by(2) {
-                    let z0 = data[i] * inv_sigma;
-                    let z1 = if i + 1 < self.dimension { data[i + 1] * inv_sigma } else { 0.0 };
+                    let z0 = rotated[i] * inv_sigma;
+                    let z1 = if i + 1 < self.dimension { rotated[i + 1] * inv_sigma } else { 0.0 };
 
                     let c0 = self.quantize_4bit(z0);
                     let c1 = self.quantize_4bit(z1);
@@ -118,7 +192,7 @@ impl TurboIndex {
                     let mut byte_val = 0u8;
                     for b in 0..4 {
                         if i + b < self.dimension {
-                            let z = data[i + b] * inv_sigma;
+                            let z = rotated[i + b] * inv_sigma;
                             let c = self.quantize_2bit(z);
                             byte_val |= (c & 0x03) << (b * 2);
                         }
@@ -181,6 +255,10 @@ impl TurboIndex {
             return Vec::new();
         }
 
+        // Apply identical block-orthogonal rotation to query
+        let mut q_rotated = vec![0.0f32; self.dimension];
+        self.rotate_vector(query, &mut q_rotated);
+
         let mut results = Vec::new();
 
         for vec in &self.vectors {
@@ -198,9 +276,9 @@ impl TurboIndex {
                         let c0 = (byte & 0x0F) as usize;
                         let c1 = ((byte >> 4) & 0x0F) as usize;
 
-                        dot += query[i] * (LLOYD_MAX_4BIT_CENTROIDS[c0] * sigma);
+                        dot += q_rotated[i] * (LLOYD_MAX_4BIT_CENTROIDS[c0] * sigma);
                         if i + 1 < self.dimension {
-                            dot += query[i + 1] * (LLOYD_MAX_4BIT_CENTROIDS[c1] * sigma);
+                            dot += q_rotated[i + 1] * (LLOYD_MAX_4BIT_CENTROIDS[c1] * sigma);
                         }
                     }
                 }
@@ -210,7 +288,7 @@ impl TurboIndex {
                         for b in 0..4 {
                             if i + b < self.dimension {
                                 let c = ((byte >> (b * 2)) & 0x03) as usize;
-                                dot += query[i + b] * (LLOYD_MAX_2BIT_CENTROIDS[c] * sigma);
+                                dot += q_rotated[i + b] * (LLOYD_MAX_2BIT_CENTROIDS[c] * sigma);
                             }
                         }
                     }
