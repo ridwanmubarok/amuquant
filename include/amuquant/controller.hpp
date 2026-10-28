@@ -87,6 +87,10 @@ public:
     uint64_t get_last_actual_reclaimed() const { return last_actual_reclaimed_bytes_; }
     int64_t get_last_estimation_delta() const { return last_estimation_delta_bytes_; }
 
+    void update_attention_sink(uint32_t sink_tokens) {
+        config_.attention_sink_tokens = sink_tokens;
+    }
+
     void reset();
 
 private:

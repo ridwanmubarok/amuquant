@@ -41,10 +41,15 @@ double AMUQuantController::compute_phi_score(
             double deficit = static_cast<double>(config_.os_reserved_bytes - current_stats.available_ram_bytes);
             util_system = 1.0 + (deficit / static_cast<double>(config_.os_reserved_bytes));
         } else if (current_stats.total_ram_bytes > config_.os_reserved_bytes) {
-            uint64_t usable_ram = current_stats.total_ram_bytes - config_.os_reserved_bytes;
-            uint64_t used_system = (current_stats.total_ram_bytes > current_stats.available_ram_bytes) ?
-                                   (current_stats.total_ram_bytes - current_stats.available_ram_bytes) : 0;
-            util_system = static_cast<double>(used_system) / static_cast<double>(usable_ram);
+            // Host pressure scales dynamically as available memory approaches the reserve buffer
+            double safe_headroom = static_cast<double>(config_.os_reserved_bytes) * 2.0;
+            if (current_stats.available_ram_bytes < safe_headroom) {
+                double span = safe_headroom - static_cast<double>(config_.os_reserved_bytes);
+                double dist = safe_headroom - static_cast<double>(current_stats.available_ram_bytes);
+                util_system = 0.5 + 0.5 * (dist / span);
+            } else {
+                util_system = 0.2; // Abundant host headroom
+            }
         }
     }
 
@@ -59,10 +64,19 @@ double AMUQuantController::compute_phi_score(
     projected_growth = std::min(projected_growth, 1.0);
 
     // 4. Kernel swap thrashing penalty
-    constexpr double SWAP_SCALE_BYTES = 1024.0 * 1024.0 * 1024.0; // 1.0 GB normalizer
+    // On systems with unified memory (e.g. Darwin/macOS), the OS often retains inactive/compressed
+    // pages in swap even when memory headroom is healthy. True thrashing occurs when swap is present
+    // AND host available RAM approaches or drops below the safety reserve buffer.
+    constexpr double SWAP_SCALE_BYTES = 2048.0 * 1024.0 * 1024.0; // 2.0 GB normalizer
     double swap_penalty = 0.0;
     if (current_stats.swap_used_bytes > 0) {
-        swap_penalty = std::min(1.0, static_cast<double>(current_stats.swap_used_bytes) / SWAP_SCALE_BYTES);
+        double raw_swap = std::min(1.0, static_cast<double>(current_stats.swap_used_bytes) / SWAP_SCALE_BYTES);
+        if (current_stats.available_ram_bytes > 0 && current_stats.available_ram_bytes < (config_.os_reserved_bytes * 2)) {
+            double urgency = 1.0 - (static_cast<double>(current_stats.available_ram_bytes) / static_cast<double>(config_.os_reserved_bytes * 2));
+            swap_penalty = raw_swap * std::max(0.1, urgency);
+        } else {
+            swap_penalty = raw_swap * 0.1; // Minimal baseline for dormant swap
+        }
     }
 
     // 5. Hybrid predictive metric: baseline pressure + differential velocity + swap penalty
@@ -106,11 +120,11 @@ double AMUQuantController::evaluate_action_cost(
             uint32_t win = config_.recent_window_tokens;
             if (current_seq_len > sink + win) {
                 uint32_t middle_count = current_seq_len - sink - win;
-                // 4-bit Lloyd-Max compression (~85% logical KV footprint mitigation) calibrated via adaptive_calib_factor_
-                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.85 * adaptive_calib_factor_;
+                double factor = (turbovec_idx_ != nullptr) ? 0.85 : 1.0;
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * factor * adaptive_calib_factor_;
             }
             latency_cost = 0.05; // ~0.5ms SIMD commit overhead
-            quality_loss = 0.14; // 4-bit Lloyd-Max distortion (1 - 0.86 cosine)
+            quality_loss = (turbovec_idx_ != nullptr) ? 0.14 : 0.05;
             break;
         }
 
@@ -119,11 +133,11 @@ double AMUQuantController::evaluate_action_cost(
             uint32_t win = config_.min_recent_window_tokens;
             if (current_seq_len > sink + win) {
                 uint32_t middle_count = current_seq_len - sink - win;
-                // 2-bit Lloyd-Max compression (~93% logical KV footprint mitigation) calibrated via adaptive_calib_factor_
-                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * 0.93 * adaptive_calib_factor_;
+                double factor = (turbovec_idx_ != nullptr) ? 0.93 : 1.0;
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * factor * adaptive_calib_factor_;
             }
             latency_cost = 0.18; // Requantization pass + single-layer paging
-            quality_loss = 0.22; // 2-bit Lloyd-Max distortion (1 - 0.78 cosine)
+            quality_loss = (turbovec_idx_ != nullptr) ? 0.22 : 0.10;
             break;
         }
     }
@@ -152,8 +166,10 @@ double AMUQuantController::evaluate_action_cost(
         }
     }
 
-    if (current_stats.swap_used_bytes > 500ULL * 1024ULL * 1024ULL && candidate_regime == Regime::REGIME_1_HIGH_THROUGHPUT) {
-        oom_risk += 2.0;
+    if (current_stats.swap_used_bytes > 1500ULL * 1024ULL * 1024ULL && 
+        mitigated_available_ram < (static_cast<double>(config_.os_reserved_bytes) * 1.2) &&
+        candidate_regime == Regime::REGIME_1_HIGH_THROUGHPUT) {
+        oom_risk += 1.0;
     }
 
     return oom_risk + 

@@ -216,7 +216,7 @@ bool KVSurgeon::execute_eviction(
     const KVSeqRmFunc& seq_rm,
     const KVSeqAddFunc& seq_add
 ) {
-    if (!range.valid() || turbovec_idx_ == nullptr) {
+    if (!range.valid()) {
         return false;
     }
 
@@ -228,59 +228,68 @@ bool KVSurgeon::execute_eviction(
         }
     }
 
-    // Phase 1: Staging and Verification
-    // Extract representations using immutable logical IDs
     size_t count = static_cast<size_t>(range.p_end - range.p_start);
     std::vector<uint64_t> logical_ids;
-    std::vector<const float*> extracted_vecs;
     logical_ids.reserve(count);
-    extracted_vecs.reserve(count);
 
-    for (int32_t pos = range.p_start; pos < range.p_end; ++pos) {
-        uint64_t logical_id = token_map_.get_logical_id(pos);
-        if (logical_id == UINT64_MAX) {
-            return false;
-        }
-        const float* vec_ptr = extractor ? extractor(static_cast<int32_t>(logical_id)) : nullptr;
-        if (vec_ptr == nullptr) {
-            // Abort Phase 1: Missing vector representation, zero KV modifications
-            return false;
-        }
-        logical_ids.push_back(logical_id);
-        extracted_vecs.push_back(vec_ptr);
-    }
+    // If TurboVec episodic index is active, perform Phase 1: extraction and archival
+    if (turbovec_idx_ != nullptr) {
+        std::vector<const float*> extracted_vecs;
+        extracted_vecs.reserve(count);
 
-    // Insert verified representations into TurboQuant vector index under immutable logical IDs
-    if (async_archiver_) {
-        bool commit_ok = async_archiver_->commit_batch(logical_ids, extracted_vecs);
-        if (!commit_ok) {
-            // Insertion into vector memory failed or was aborted: preserve KV cache
-            return false;
+        for (int32_t pos = range.p_start; pos < range.p_end; ++pos) {
+            uint64_t logical_id = token_map_.get_logical_id(pos);
+            if (logical_id == UINT64_MAX) {
+                return false;
+            }
+            const float* vec_ptr = extractor ? extractor(static_cast<int32_t>(logical_id)) : nullptr;
+            if (vec_ptr == nullptr) {
+                // Abort Phase 1: Missing vector representation, zero KV modifications
+                return false;
+            }
+            logical_ids.push_back(logical_id);
+            extracted_vecs.push_back(vec_ptr);
+        }
+
+        // Insert verified representations into TurboQuant vector index under immutable logical IDs
+        if (async_archiver_) {
+            bool commit_ok = async_archiver_->commit_batch(logical_ids, extracted_vecs);
+            if (!commit_ok) {
+                return false;
+            }
+        } else {
+            bool all_ok = true;
+            size_t failed_idx = 0;
+            for (size_t i = 0; i < count; ++i) {
+                TurbovecStatus insert_st = turbovec_insert_zero_copy(
+                    turbovec_idx_, logical_ids[i], extracted_vecs[i], embedding_dim_
+                );
+                if (insert_st != TURBOVEC_STATUS_OK) {
+                    all_ok = false;
+                    failed_idx = i;
+                    break;
+                }
+            }
+            if (!all_ok) {
+                // Atomic rollback of partially inserted vectors 0..failed_idx-1
+                for (size_t r = 0; r < failed_idx; ++r) {
+                    turbovec_remove(turbovec_idx_, logical_ids[r]);
+                }
+                return false;
+            }
         }
     } else {
-        bool all_ok = true;
-        size_t failed_idx = 0;
-        for (size_t i = 0; i < count; ++i) {
-            TurbovecStatus insert_st = turbovec_insert_zero_copy(
-                turbovec_idx_, logical_ids[i], extracted_vecs[i], embedding_dim_
-            );
-            if (insert_st != TURBOVEC_STATUS_OK) {
-                all_ok = false;
-                failed_idx = i;
-                break;
+        // Pure KV memory management mode without vector indexing
+        for (int32_t pos = range.p_start; pos < range.p_end; ++pos) {
+            uint64_t logical_id = token_map_.get_logical_id(pos);
+            if (logical_id != UINT64_MAX) {
+                logical_ids.push_back(logical_id);
             }
-        }
-        if (!all_ok) {
-            // Atomic rollback of partially inserted vectors 0..failed_idx-1
-            for (size_t r = 0; r < failed_idx; ++r) {
-                turbovec_remove(turbovec_idx_, logical_ids[r]);
-            }
-            return false;
         }
     }
 
     // Phase 2: Transactional Commit
-    // 1. Prune physical KV sequence slot range only after guaranteed vector archiving
+    // 1. Prune physical KV sequence slot range
     bool rm_ok = false;
     try {
         if (seq_rm) {
@@ -291,10 +300,10 @@ bool KVSurgeon::execute_eviction(
     }
 
     if (!rm_ok) {
-        // Phase 2a failure: sequence removal rejected by backend or threw exception.
-        // Rollback all archived vectors from turbovec index to prevent unpruned KV divergence.
-        for (uint64_t id : logical_ids) {
-            turbovec_remove(turbovec_idx_, id);
+        if (turbovec_idx_ != nullptr) {
+            for (uint64_t id : logical_ids) {
+                turbovec_remove(turbovec_idx_, id);
+            }
         }
         return false;
     }
@@ -311,10 +320,10 @@ bool KVSurgeon::execute_eviction(
     }
 
     if (!add_ok) {
-        // Phase 2b failure: RoPE positional adjustment rejected by backend or threw exception.
-        // Rollback all archived vectors from turbovec index.
-        for (uint64_t id : logical_ids) {
-            turbovec_remove(turbovec_idx_, id);
+        if (turbovec_idx_ != nullptr) {
+            for (uint64_t id : logical_ids) {
+                turbovec_remove(turbovec_idx_, id);
+            }
         }
         return false;
     }

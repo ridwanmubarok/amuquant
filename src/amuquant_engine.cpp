@@ -25,9 +25,13 @@ AMUQuantEngine::~AMUQuantEngine() {
 }
 
 Status AMUQuantEngine::initialize() {
-    TurbovecStatus status = turbovec_init(config_.embedding_dim, config_.initial_bit_width, &turbovec_handle_);
-    if (status != TURBOVEC_STATUS_OK || turbovec_handle_ == nullptr) {
-        return Status::ERR_OUT_OF_MEMORY;
+    if (config_.enable_turbovec) {
+        TurbovecStatus status = turbovec_init(config_.embedding_dim, config_.initial_bit_width, &turbovec_handle_);
+        if (status != TURBOVEC_STATUS_OK || turbovec_handle_ == nullptr) {
+            return Status::ERR_OUT_OF_MEMORY;
+        }
+    } else {
+        turbovec_handle_ = nullptr;
     }
 
     telemetry_ = std::make_shared<SystemTelemetry>();
