@@ -98,6 +98,59 @@ uint64_t AMUQuantEngine::record_turn(const std::string& role, const std::string&
     return history_store_->append_turn(role, content, token_start, token_end);
 }
 
+std::vector<SearchResult> AMUQuantEngine::recall_context(const std::string& query_text, uint32_t top_k) {
+    if (!history_store_ || query_text.empty()) {
+        return {};
+    }
+    auto matches = history_store_->search_lexical(query_text, /*evicted_only=*/false);
+    std::vector<SearchResult> results;
+    for (size_t i = 0; i < matches.size() && (top_k == 0 || i < top_k); ++i) {
+        results.push_back({matches[i].first, matches[i].second});
+    }
+    return results;
+}
+
+std::vector<SearchResult> AMUQuantEngine::recall_context(const float* /*embd*/, uint32_t /*top_k*/) {
+    return {};
+}
+
+std::string AMUQuantEngine::reconstruct_memory_prompt(const std::string& query_text, const float* /*dense_query*/, uint32_t top_k) {
+    if (!history_store_ || query_text.empty()) {
+        return "";
+    }
+
+    auto matches = history_store_->search_lexical(query_text, /*evicted_only=*/true);
+    if (matches.empty()) {
+        matches = history_store_->search_lexical(query_text, /*evicted_only=*/false);
+    }
+
+    if (matches.empty()) {
+        return "";
+    }
+
+    std::vector<RetrievedMemory> memories;
+    for (const auto& match : matches) {
+        if (match.second < 0.20f) continue;
+        const auto* turn = history_store_->get_turn(match.first);
+        if (turn) {
+            RetrievedMemory m;
+            m.turn_id = turn->turn_id;
+            m.role = turn->role;
+            m.content = turn->content;
+            m.lexical_score = match.second;
+            m.combined_score = match.second;
+            memories.push_back(m);
+            if (top_k > 0 && memories.size() >= top_k) break;
+        }
+    }
+
+    if (memories.empty()) {
+        return "";
+    }
+
+    return history_store_->format_system_memory_context(memories);
+}
+
 EngineMetrics AMUQuantEngine::get_metrics() const {
     return metrics_;
 }

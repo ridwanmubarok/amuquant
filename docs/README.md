@@ -1,6 +1,6 @@
 # AMU-QUANT Technical Documentation
 
-This directory contains the scientific specifications, mathematical formulations, subsystem architecture, foreign function interface (FFI) contracts, and experimental evaluation methodology for **AMU-QUANT** (*Co-Adaptive Runtime Memory Policy and Transactional KV-Cache Compression for On-Device Large Language Model Inference*).
+This directory contains the scientific specifications, mathematical formulations, subsystem architecture, and experimental evaluation methodology for **AMU-QUANT** (*Host-Aware Co-Adaptive Runtime Memory Policy and Sliding-Window KV-Cache Surgery for Edge Large Language Model Inference*).
 
 ---
 
@@ -8,11 +8,10 @@ This directory contains the scientific specifications, mathematical formulations
 
 | Index | Document | Summary |
 |:---:|:---|:---|
-| **01** | [**System Architecture**](01_SYSTEM_ARCHITECTURE.md) | High-level subsystem layout (Layer Manager, KV Surgery, FFI Bridge, Controller), zero-copy pointer flows, and thread-safety invariants. |
-| **02** | [**Mathematical Model & Controller**](02_MATHEMATICAL_MODEL_AND_CONTROLLER.md) | Dual-budget memory equilibrium inequality, predictive pressure metric $\Phi_t$, hysteresis state machine, and scheduling algorithm. |
-| **03** | [**turbovec FFI Specification**](03_TURBOVEC_FFI_SPECIFICATION.md) | C-ABI interface header `turbovec_ffi.h`, Rust bridge implementation, Lloyd-Max codebooks, in-place 2-bit requantization, and SIMD vectorization. |
-| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds, locally verified empirical benchmarks (Part I), proposed academic evaluation protocols (Part II), and metrics. |
-| **05** | [**Literature Review & References**](05_LITERATURE_REVIEW_AND_REFERENCES.md) | Critical analysis of AirLLM, llama.cpp mmap, evict-to-trash pruning (StreamingLLM, H2O, ThinKV, Lethe), Data Science & NLP theoretical foundations, and verified citations. |
+| **01** | [**System Architecture**](01_SYSTEM_ARCHITECTURE.md) | High-level native C++17 subsystem layout (Telemetry, Layer Manager, KV Surgeon, Controller, Canonical History), memory boundaries, and thread-safety invariants. |
+| **02** | [**Mathematical Model & Controller**](02_MATHEMATICAL_MODEL_AND_CONTROLLER.md) | Dual-budget memory equilibrium inequality, predictive pressure metric $\Phi_t$, cost-benefit utility $J(a)$, hysteresis state transitions, and scheduling algorithm. |
+| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds, empirical benchmarks (Triad: llama.cpp vs. AirLLM vs. AMU-QUANT), host memory starvation protocols, and metrics. |
+| **05** | [**Literature Review & References**](05_LITERATURE_REVIEW_AND_REFERENCES.md) | Critical comparative analysis against AirLLM, llama.cpp mmap, attention sinking (StreamingLLM, H2O, ThinKV), computer systems memory modeling, and verified academic references. |
 
 ---
 
@@ -20,47 +19,44 @@ This directory contains the scientific specifications, mathematical formulations
 
 ```mermaid
 flowchart TD
-    subgraph Kernel_OS ["Operating System Kernel & Virtual Memory"]
+    subgraph Kernel_OS ["Operating System Kernel & Host Hardware"]
         VM_Stat["Memory & Swap Telemetry (/proc/meminfo / mach_vm_info)"]
         KernelMadvise["Kernel Directives: posix_madvise(DONTNEED / WILLNEED) & mincore(2)"]
     end
 
-    subgraph AMUQuant_Engine ["AMU-QUANT Co-Adaptive Controller (C++17)"]
+    subgraph AMUQuant_Engine ["AMU-QUANT Co-Adaptive Controller (Native C++17)"]
         Sampling["Periodic Telemetry Sampler (K-token stride)"]
         ScoreEngine["Predictive Memory Pressure Estimator: Φ_t"]
-        RegimeLogic{"Hysteresis State Machine (δ_hyst)"}
-        R1["Regime 1: High-Throughput (Max Prefetch)"]
-        R2["Regime 2: Balanced Offloading (turbovec 4-bit)"]
-        R3["Regime 3: Ultra-Low Survival (turbovec 2-bit + Single-Layer Advisory Paging)"]
+        RegimeLogic{"Predictive Cost-Benefit Arbitration: min J(a)"}
+        R1["Regime 1: High-Throughput (Max Prefetch, Unconstrained Decode)"]
+        R2["Regime 2: Balanced Offload (Proactive KV Working-Set Compaction)"]
+        R3["Regime 3: Ultra-Low Survival (Emergency Clamping + Single-Layer Advisory Paging)"]
     end
 
-    subgraph Llama_CPP ["Inference Backend: llama.cpp"]
+    subgraph Llama_CPP ["Inference Engine: llama.cpp"]
         MmapWeights["Model Weights (Unified GGUF via mmap)"]
-        ActiveKVCache["Active Physical KV-Cache Working Set"]
-        Surgery["KV Surgery: llama_kv_cache_seq_rm & seq_add"]
+        ActiveKVCache["Active Physical KV-Cache Working Set (Bounded O(1))"]
+        Surgery["KV Surgery: llama_memory_seq_rm & seq_add (RoPE Shift)"]
     end
 
-    subgraph Turbovec_Rust ["Vector Index: turbovec (Rust C-ABI via FFI)"]
-        FFI["turbovec-ffi (Zero-Copy Raw Pointer Bridge)"]
-        TurboQuant["TurboQuant Index (Lloyd-Max Scalar Quantizer)"]
-        Requantize["In-Place 4-bit -> 2-bit Requantization"]
-        SIMD["SIMD Fast Search (<0.25 ms Cosine Recall)"]
+    subgraph History_Memory ["Canonical History & Context Reconstruction"]
+        HistoryStore["Canonical History Store (Verbatim Turn Archive)"]
+        ReconstructPrompt["Query-Driven Context Reconstruction Block"]
     end
 
     VM_Stat --> Sampling
     Sampling --> ScoreEngine
     ScoreEngine --> RegimeLogic
-    RegimeLogic -->|Φ_t ≤ θ_low| R1
-    RegimeLogic -->|θ_low < Φ_t ≤ θ_high| R2
-    RegimeLogic -->|Φ_t > θ_high| R3
+    RegimeLogic -->|Low Pressure & Within Budget| R1
+    RegimeLogic -->|Moderate Pressure or Exceeds Budget| R2
+    RegimeLogic -->|Critical RAM Pressure / Host Starvation| R3
 
     R1 -.->|Prefetch Upcoming Layer Pages| KernelMadvise
-    R2 -->|Trigger KV Eviction & Advisory Paging| Surgery
-    R3 -->|Trigger In-Place 2-bit Requantization| Requantize
-
-    Surgery -->|Pass Pruned Token Pointer| FFI
-    FFI --> TurboQuant
-    SIMD -->|Selective Context Recall| ActiveKVCache
+    R2 -->|Trigger Bounded KV Pruning & RoPE Shift| Surgery
+    R3 -->|Trigger Emergency Window Squeeze & Single Layer Execution| Surgery
+    Surgery -->|Mark Evicted Turn IDs| HistoryStore
+    HistoryStore -->|Lexical Query Match on Evicted Context| ReconstructPrompt
+    ReconstructPrompt -->|Re-inject Factual Needles into User Prompt| ActiveKVCache
 
     KernelMadvise --> MmapWeights
 ```
@@ -74,7 +70,6 @@ docs/
 ├── README.md                                 # Technical documentation index
 ├── 01_SYSTEM_ARCHITECTURE.md                 # Subsystem design & execution flow
 ├── 02_MATHEMATICAL_MODEL_AND_CONTROLLER.md   # Formal equilibrium & predictive metric
-├── 03_TURBOVEC_FFI_SPECIFICATION.md          # C-ABI header & Rust FFI implementation
 ├── 04_EXPERIMENTAL_METHODOLOGY.md            # Benchmark protocols, hardware, & metrics
-└── 05_LITERATURE_REVIEW_AND_REFERENCES.md    # Critical analysis, Data Science & citations
+└── 05_LITERATURE_REVIEW_AND_REFERENCES.md    # Critical analysis & citations
 ```

@@ -13,9 +13,8 @@ models/*.gguf
 models/*.bin
 *.gguf
 
-# Rust Cargo build
+# Rust Cargo build (legacy)
 target/
-turbovec-ffi/target/
 
 # External dependencies
 external/

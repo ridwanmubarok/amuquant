@@ -66,8 +66,9 @@ public:
 
     EngineMetrics get_metrics() const;
 
-    std::vector<SearchResult> recall_context(const float* = nullptr, uint32_t = 0) { return {}; }
-    std::string reconstruct_memory_prompt(const std::string& = "", const float* = nullptr, uint32_t = 0) { return ""; }
+    std::vector<SearchResult> recall_context(const std::string& query_text, uint32_t top_k = 3);
+    std::vector<SearchResult> recall_context(const float* embd = nullptr, uint32_t top_k = 0);
+    std::string reconstruct_memory_prompt(const std::string& query_text = "", const float* dense_query = nullptr, uint32_t top_k = 3);
 
     std::shared_ptr<SystemTelemetry> get_telemetry() { return telemetry_; }
     std::shared_ptr<LayerManager> get_layer_manager() { return layer_mgr_; }
