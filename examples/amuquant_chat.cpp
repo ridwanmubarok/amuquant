@@ -99,15 +99,11 @@ int calculate_optimal_gpu_layers(const std::string& model_path, const GGUFModelI
     return layers;
 }
 
-void print_banner(const GGUFModelInfo& info, const MemoryStats& mem, int gpu_layers, int pcores, bool flash_attn, bool with_turbovec) {
+void print_banner(const GGUFModelInfo& info, const MemoryStats& mem, int gpu_layers, int pcores, bool flash_attn) {
     std::cout << ANSI_CYAN << ANSI_BOLD;
     std::cout << "================================================================================\n";
     std::cout << "  AMU-QUANT CHAT: Accelerated Neural LLM Inference (AMU-QUANT Controller)       \n";
-    if (with_turbovec) {
-        std::cout << "  Engine: libllama (Metal/CPU) + TurboQuant Vector Index (turbovec FFI)       \n";
-    } else {
-        std::cout << "  Engine: libllama (Metal/CPU) + AMU-QUANT Core Memory Manager (Standalone KV)\n";
-    }
+    std::cout << "  Engine: libllama (Metal/CPU) + Host-Aware Co-Adaptive Memory Manager           \n";
     std::cout << "================================================================================\n";
     std::cout << ANSI_RESET;
     std::cout << ANSI_GRAY;
@@ -118,13 +114,13 @@ void print_banner(const GGUFModelInfo& info, const MemoryStats& mem, int gpu_lay
     std::cout << "  Memory: System RAM: " << (mem.total_ram_bytes / (1024 * 1024 * 1024)) << " GB | "
               << "Available: " << (mem.available_ram_bytes / (1024 * 1024)) << " MB | "
               << "Process RSS: " << (mem.process_rss_bytes / (1024 * 1024)) << " MB\n";
-    std::cout << "  Vector Memory Index: " << (with_turbovec ? "ENABLED (Episodic Storage)" : "DISABLED (Core Memory Management Mode)") << "\n";
+    std::cout << "  Operating Mode: Pure Host-Aware Co-Adaptive Memory Management (Anti-Crash)\n";
     std::cout << "  Commands: /stats, /regime, /clear, /help, /exit\n";
     std::cout << "--------------------------------------------------------------------------------\n";
     std::cout << ANSI_RESET << std::endl;
 }
 
-void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gpu_layers, int pcores, bool with_turbovec) {
+void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gpu_layers, int pcores) {
     EngineMetrics m = engine.get_metrics();
     MemoryStats s = const_cast<AMUQuantEngine&>(engine).get_telemetry()->sample();
 
@@ -134,7 +130,6 @@ void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gp
     std::cout << "  - Hardware Acceleration: Metal GPU (" << gpu_layers << "/" << info.block_count << " layers) + CPU (" << pcores << " P-Cores)\n";
     std::cout << "  - Process Resident Memory (RSS): " << (s.process_rss_bytes / (1024 * 1024)) << " MB\n";
     std::cout << "  - Available Physical RAM: " << (s.available_ram_bytes / (1024 * 1024)) << " MB\n";
-    std::cout << "  - Vector Memory Index (TurboVec): " << (with_turbovec ? "ENABLED" : "DISABLED (Standalone KV Mode)") << "\n";
     std::cout << "  - Major Page Faults (ru_majflt): " << s.major_page_faults << "\n";
     std::cout << "  - Total Tokens Generated: " << m.total_tokens_generated << "\n";
     std::cout << "  - Total KV Evictions: " << m.total_kv_evictions << "\n";
@@ -147,15 +142,10 @@ void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gp
 
 int main(int argc, char** argv) {
     std::string model_path = "models/qwen2.5-3b-instruct-q4_k_m.gguf";
-    bool with_turbovec = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--with-turbovec" || arg == "--turbovec") {
-            with_turbovec = true;
-        } else if (arg == "--no-turbovec" || arg == "--standalone-kv") {
-            with_turbovec = false;
-        } else if (arg.rfind("--", 0) != 0) {
+        if (arg.rfind("--", 0) != 0) {
             model_path = arg;
         }
     }
@@ -191,7 +181,6 @@ int main(int argc, char** argv) {
     AMUQuantConfig cfg;
     cfg.num_layers = model_info.block_count > 0 ? model_info.block_count : 32;
     cfg.embedding_dim = model_info.embedding_length > 0 ? model_info.embedding_length : 4096;
-    cfg.enable_turbovec = with_turbovec;
 
     uint64_t total_ram = (init_mem.total_ram_bytes > 0) ? init_mem.total_ram_bytes : 8ULL * 1024ULL * 1024ULL * 1024ULL;
     if (total_ram >= 15ULL * 1024ULL * 1024ULL * 1024ULL) {
@@ -206,7 +195,7 @@ int main(int argc, char** argv) {
     cfg.recent_window_tokens = 512;
     cfg.min_recent_window_tokens = 128;
     cfg.min_eviction_batch = 16;
-    cfg.attention_sink_tokens = 64; // Will be updated to exact n_sys after system prompt tokenize
+    cfg.attention_sink_tokens = 64; // Dynamically updated to exact n_sys
     cfg.kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : (model_info.head_count > 0 ? model_info.head_count : 8);
     cfg.head_dim = model_info.head_dim > 0 ? model_info.head_dim : 128;
     cfg.kv_bytes_per_element = 2;
@@ -246,7 +235,7 @@ int main(int argc, char** argv) {
     cparams.n_batch = 512;
     cparams.n_threads = pcore_threads;
     cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-    cparams.embeddings = with_turbovec;
+    cparams.embeddings = false; // Pure token generation mode
 
     llama_context* ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
@@ -264,50 +253,11 @@ int main(int argc, char** argv) {
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.7f));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(42));
 
-    print_banner(model_info, init_mem, gpu_layers, pcore_threads, true, with_turbovec);
-
-    // Contiguous zero-allocation context embedding store
-    struct ContiguousEmbeddingStore {
-        uint32_t embedding_dim{4096};
-        std::vector<float> data_pool;
-        size_t count{0};
-
-        void reserve(size_t max_tokens, uint32_t dim) {
-            embedding_dim = dim;
-            data_pool.resize(max_tokens * dim, 0.0f);
-            count = 0;
-        }
-
-        void append(const float* embd) {
-            if (embd != nullptr) {
-                std::memcpy(&data_pool[count * embedding_dim], embd, embedding_dim * sizeof(float));
-            } else {
-                std::memset(&data_pool[count * embedding_dim], 0, embedding_dim * sizeof(float));
-            }
-            count++;
-        }
-
-        const float* get(size_t index) const {
-            if (index < count) return &data_pool[index * embedding_dim];
-            return nullptr;
-        }
-
-        size_t size() const { return count; }
-
-        void clear() { count = 0; }
-    };
+    print_banner(model_info, init_mem, gpu_layers, pcore_threads, true);
 
     // Context tracking state
     int32_t n_past = 0;
-    ContiguousEmbeddingStore session_embeddings;
-    session_embeddings.reserve(8192, model_info.embedding_length);
     llama_memory_t mem = llama_get_memory(ctx);
-
-    auto extractor = [&](int32_t logical_id) -> const float* {
-        return session_embeddings.get(static_cast<size_t>(logical_id));
-    };
-
-    int32_t total_rope_shift = 0;
 
     auto seq_rm = [&](int32_t p0, int32_t p1) -> bool {
         return llama_memory_seq_rm(mem, 0, p0, p1);
@@ -315,7 +265,6 @@ int main(int argc, char** argv) {
 
     auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) -> bool {
         llama_memory_seq_add(mem, 0, p0, p1, delta);
-        total_rope_shift += delta;
         return true;
     };
 
@@ -345,13 +294,11 @@ int main(int argc, char** argv) {
             batch.n_tokens++;
         }
         if (llama_decode(ctx, batch) == 0) {
-            for (int i = 0; i < n_sys; ++i) {
-                const float* embd = (with_turbovec) ? llama_get_embeddings_ith(ctx, i) : nullptr;
-                session_embeddings.append(embd);
-            }
             n_past += n_sys;
         }
     }
+
+    uint64_t logical_token_id = n_past;
 
     while (true) {
         std::cout << ANSI_BOLD << ANSI_GREEN << "user> " << ANSI_RESET;
@@ -369,19 +316,18 @@ int main(int argc, char** argv) {
             std::cout << ANSI_GRAY << "Mengakhiri sesi chat AMU-QUANT.\n" << ANSI_RESET;
             break;
         } else if (user_input == "/stats" || user_input == "/telemetry") {
-            print_stats(engine, model_info, gpu_layers, pcore_threads, with_turbovec);
+            print_stats(engine, model_info, gpu_layers, pcore_threads);
             continue;
         } else if (user_input == "/regime") {
             auto reg = engine.get_controller()->get_current_regime();
             double phi = engine.get_controller()->get_last_phi();
             std::cout << ANSI_YELLOW << "Rejim Aktif: " << regime_to_string(reg) 
-                      << " (Skor Tekanan Φ_t = " << std::fixed << std::setprecision(3) << phi << ")\n" << ANSI_RESET;
+                      << " (Skor Tekanan Phi_t = " << std::fixed << std::setprecision(3) << phi << ")\n" << ANSI_RESET;
             continue;
         } else if (user_input == "/clear") {
             llama_memory_clear(mem, true);
             n_past = 0;
-            total_rope_shift = 0;
-            session_embeddings.clear();
+            logical_token_id = 0;
             engine.get_controller()->reset();
             if (engine.get_history_store()) {
                 engine.get_history_store()->clear();
@@ -391,34 +337,19 @@ int main(int argc, char** argv) {
         } else if (user_input == "/help") {
             std::cout << ANSI_GRAY << "Perintah yang tersedia:\n"
                       << "  /stats    - Menampilkan telemetri memori real-time dan metrik AMU-QUANT\n"
-                      << "  /regime   - Menampilkan status rejim adaptasi dan skor prediktif Φ_t\n"
+                      << "  /regime   - Menampilkan status rejim adaptasi dan skor prediktif Phi_t\n"
                       << "  /clear    - Mengosongkan riwayat konteks dan mereset KV-Cache\n"
                       << "  /help     - Menampilkan bantuan ini\n"
                       << "  /exit     - Keluar dari program\n" << ANSI_RESET;
             continue;
         }
 
-        // 4b. Query-driven hybrid context reconstruction (active when with_turbovec is enabled)
-        std::string memory_block;
-        if (with_turbovec) {
-            memory_block = engine.reconstruct_memory_prompt(user_input, nullptr, 2);
-            if (!memory_block.empty()) {
-                std::cout << ANSI_YELLOW << "[AMU-QUANT: Mengambil kembali konteks memori historis yang telah dievikuasi]" << ANSI_RESET << "\n";
-            }
-        }
-
         // 5. Format prompt according to model architecture (Llama-3 or Qwen ChatML)
         std::string user_prompt;
         if (is_llama) {
-            if (!memory_block.empty()) {
-                user_prompt = "<|start_header_id|>system<|end_header_id|>\n\n" + memory_block + "<|eot_id|>";
-            }
-            user_prompt += "<|start_header_id|>user<|end_header_id|>\n\n" + user_input + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+            user_prompt = "<|start_header_id|>user<|end_header_id|>\n\n" + user_input + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
         } else {
-            if (!memory_block.empty()) {
-                user_prompt = "<|im_start|>system\n" + memory_block + "<|im_end|>\n";
-            }
-            user_prompt += "<|im_start|>user\n" + user_input + "<|im_end|>\n<|im_start|>assistant\n";
+            user_prompt = "<|im_start|>user\n" + user_input + "<|im_end|>\n<|im_start|>assistant\n";
         }
         std::vector<llama_token> prompt_tokens(user_prompt.size() + 16);
         int n_tokens = llama_tokenize(vocab, user_prompt.c_str(), user_prompt.size(), prompt_tokens.data(), prompt_tokens.size(), false, true);
@@ -449,9 +380,7 @@ int main(int argc, char** argv) {
         }
 
         for (int i = 0; i < n_tokens; ++i) {
-            engine.append_token(session_embeddings.size());
-            const float* embd = (with_turbovec) ? llama_get_embeddings_ith(ctx, i) : nullptr;
-            session_embeddings.append(embd);
+            engine.append_token(logical_token_id++);
         }
         n_past += n_tokens;
         int32_t prompt_tok_end = n_past;
@@ -496,13 +425,13 @@ int main(int argc, char** argv) {
             }
 
             // Register newly decoded logical token
-            engine.append_token(session_embeddings.size());
+            engine.append_token(logical_token_id++);
 
             // Active physical sequence length in KV-cache
             int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
 
             // Trigger AMU-QUANT controller hook to arbitrate memory pressure and KV eviction
-            engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+            engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
             // Fetch highest valid sequence position from physical KV memory
             llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
@@ -518,9 +447,6 @@ int main(int argc, char** argv) {
             if (llama_decode(ctx, batch) != 0) {
                 break;
             }
-
-            const float* embd = (with_turbovec) ? llama_get_embeddings_ith(ctx, 0) : nullptr;
-            session_embeddings.append(embd);
 
             n_past++;
             generated_tokens++;

@@ -96,13 +96,17 @@ struct AMUQuantConfig {
     uint32_t head_dim{128};
     uint32_t kv_bytes_per_element{2}; // Cache format bytes per scalar (2 = FP16, 1 = FP8/Q8_0, 4 = FP32)
     uint8_t initial_bit_width{4};
-    bool enable_turbovec{true};        // Enable or disable episodic vector memory index
 
     // Arbitration decision policy and multi-objective weights
     ArbitrationPolicy policy{ArbitrationPolicy::THRESHOLD_HYSTERESIS};
     double weight_latency_cost{0.25};   // Penalty weight for adaptation execution overhead (lambda_lat)
-    double weight_quality_loss{0.35};   // Penalty weight for quantization bit-width reduction (lambda_qual)
+    double weight_quality_loss{0.35};   // Penalty weight for context reduction (lambda_qual)
     double risk_oom_penalty{10.0};      // Critical penalty scale for projected physical OOM
+};
+
+struct SearchResult {
+    uint64_t id{0};
+    float score{0.0f};
 };
 
 /**

@@ -9,17 +9,14 @@ AMUQuantController::AMUQuantController(
     const AMUQuantConfig& config,
     std::shared_ptr<SystemTelemetry> telemetry,
     std::shared_ptr<LayerManager> layer_mgr,
-    std::shared_ptr<KVSurgeon> kv_surgeon,
-    TurbovecIndexHandle* turbovec_idx
+    std::shared_ptr<KVSurgeon> kv_surgeon
 ) : config_(config),
     telemetry_(std::move(telemetry)),
     layer_mgr_(std::move(layer_mgr)),
     kv_surgeon_(std::move(kv_surgeon)),
-    turbovec_idx_(turbovec_idx),
     current_regime_(Regime::REGIME_1_HIGH_THROUGHPUT),
     prefetch_depth_(3),
-    aggressive_evict_(false),
-    current_bit_width_(config.initial_bit_width) {}
+    aggressive_evict_(false) {}
 
 double AMUQuantController::compute_phi_score(
     const MemoryStats& current_stats,
@@ -64,9 +61,6 @@ double AMUQuantController::compute_phi_score(
     projected_growth = std::min(projected_growth, 1.0);
 
     // 4. Kernel swap thrashing penalty
-    // On systems with unified memory (e.g. Darwin/macOS), the OS often retains inactive/compressed
-    // pages in swap even when memory headroom is healthy. True thrashing occurs when swap is present
-    // AND host available RAM approaches or drops below the safety reserve buffer.
     constexpr double SWAP_SCALE_BYTES = 2048.0 * 1024.0 * 1024.0; // 2.0 GB normalizer
     double swap_penalty = 0.0;
     if (current_stats.swap_used_bytes > 0) {
@@ -93,11 +87,12 @@ double AMUQuantController::evaluate_action_cost(
     double projected_available_ram,
     uint32_t current_seq_len
 ) const {
+    (void)current_stats;
     uint64_t safe_limit = (config_.memory_limit_bytes > config_.os_reserved_bytes) ? 
                           (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
     if (safe_limit == 0) return 0.0;
 
-    // Dynamic architecture-aware KV sizing: 2 * num_layers * kv_heads * head_dim * kv_bytes_per_element
+    // Architecture-aware KV sizing: 2 * num_layers * kv_heads * head_dim * kv_bytes_per_element
     uint32_t n_heads = (config_.kv_heads > 0) ? config_.kv_heads : 8;
     uint32_t d_head = (config_.head_dim > 0) ? config_.head_dim : 128;
     uint32_t elem_bytes = (config_.kv_bytes_per_element > 0) ? config_.kv_bytes_per_element : 2;
@@ -120,11 +115,10 @@ double AMUQuantController::evaluate_action_cost(
             uint32_t win = config_.recent_window_tokens;
             if (current_seq_len > sink + win) {
                 uint32_t middle_count = current_seq_len - sink - win;
-                double factor = (turbovec_idx_ != nullptr) ? 0.85 : 1.0;
-                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * factor * adaptive_calib_factor_;
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * adaptive_calib_factor_;
             }
-            latency_cost = 0.05; // ~0.5ms SIMD commit overhead
-            quality_loss = (turbovec_idx_ != nullptr) ? 0.14 : 0.05;
+            latency_cost = 0.02; // Minimal sequence prune overhead
+            quality_loss = 0.05;
             break;
         }
 
@@ -133,11 +127,10 @@ double AMUQuantController::evaluate_action_cost(
             uint32_t win = config_.min_recent_window_tokens;
             if (current_seq_len > sink + win) {
                 uint32_t middle_count = current_seq_len - sink - win;
-                double factor = (turbovec_idx_ != nullptr) ? 0.93 : 1.0;
-                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * factor * adaptive_calib_factor_;
+                memory_mitigation_bytes = static_cast<double>(middle_count * bytes_per_token) * adaptive_calib_factor_;
             }
-            latency_cost = 0.18; // Requantization pass + single-layer paging
-            quality_loss = (turbovec_idx_ != nullptr) ? 0.22 : 0.10;
+            latency_cost = 0.08; // Single-layer paging advisory overhead
+            quality_loss = 0.10;
             break;
         }
     }
@@ -158,23 +151,14 @@ double AMUQuantController::evaluate_action_cost(
     // Severe penalty when available RAM breaches 75% of OS reserve floor
     if (mitigated_available_ram < (static_cast<double>(config_.os_reserved_bytes) * 0.75)) {
         if (candidate_regime != Regime::REGIME_3_ULTRA_LOW_SURVIVAL) {
-            oom_risk += 5.0;
-        }
-    } else if (mitigated_available_ram < static_cast<double>(config_.os_reserved_bytes)) {
-        if (candidate_regime == Regime::REGIME_1_HIGH_THROUGHPUT) {
-            oom_risk += 2.5;
+            oom_risk += 50.0;
         }
     }
 
-    if (current_stats.swap_used_bytes > 1500ULL * 1024ULL * 1024ULL && 
-        mitigated_available_ram < (static_cast<double>(config_.os_reserved_bytes) * 1.2) &&
-        candidate_regime == Regime::REGIME_1_HIGH_THROUGHPUT) {
-        oom_risk += 1.0;
-    }
-
-    return oom_risk + 
-           (config_.weight_latency_cost * latency_cost) + 
-           (config_.weight_quality_loss * quality_loss);
+    double J = oom_risk + 
+               (config_.weight_latency_cost * latency_cost) + 
+               (config_.weight_quality_loss * quality_loss);
+    return J;
 }
 
 Regime AMUQuantController::arbitrate_predictive_cost_benefit(
@@ -186,86 +170,94 @@ Regime AMUQuantController::arbitrate_predictive_cost_benefit(
 ) const {
     double dt = std::max(elapsed_sec, 0.05);
     double dM_dt = delta_rss_bytes / dt;
-    double projected_delta = std::max(0.0, dM_dt * config_.tau_horizon_sec);
+    double projected_rss_growth = std::max(0.0, dM_dt * config_.tau_horizon_sec);
 
-    double projected_process_rss = static_cast<double>(current_stats.process_rss_bytes) + projected_delta;
-    double projected_available_ram = (current_stats.available_ram_bytes > 0) ?
-        std::max(0.0, static_cast<double>(current_stats.available_ram_bytes) - projected_delta) : 0.0;
+    double projected_process_rss = static_cast<double>(current_stats.process_rss_bytes) + projected_rss_growth;
+    double projected_available_ram = (current_stats.available_ram_bytes > projected_rss_growth) ? 
+                                     (static_cast<double>(current_stats.available_ram_bytes) - projected_rss_growth) : 0.0;
 
-    double cost_r1 = evaluate_action_cost(Regime::REGIME_1_HIGH_THROUGHPUT, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
-    double cost_r2 = evaluate_action_cost(Regime::REGIME_2_BALANCED_OFFLOAD, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
-    double cost_r3 = evaluate_action_cost(Regime::REGIME_3_ULTRA_LOW_SURVIVAL, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
+    Regime candidates[3] = {
+        Regime::REGIME_1_HIGH_THROUGHPUT,
+        Regime::REGIME_2_BALANCED_OFFLOAD,
+        Regime::REGIME_3_ULTRA_LOW_SURVIVAL
+    };
 
-    // Minor hysteresis dampener to avoid high-frequency switching between adjacent regimes
-    if (current_regime_ == Regime::REGIME_1_HIGH_THROUGHPUT) cost_r1 -= 0.02;
-    else if (current_regime_ == Regime::REGIME_2_BALANCED_OFFLOAD) cost_r2 -= 0.02;
-    else if (current_regime_ == Regime::REGIME_3_ULTRA_LOW_SURVIVAL) cost_r3 -= 0.02;
+    Regime optimal_regime = current_regime_;
+    double min_cost = 1e9;
 
-    Regime best_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
-    double min_cost = cost_r1;
+    for (int i = 0; i < 3; ++i) {
+        Regime r = candidates[i];
+        double cost = evaluate_action_cost(r, current_stats, projected_process_rss, projected_available_ram, current_seq_len);
+        
+        // Hysteresis dampening: bias slightly towards maintaining the current operational regime
+        if (r == current_regime_) {
+            cost -= 0.01;
+        }
 
-    if (cost_r2 < min_cost) {
-        min_cost = cost_r2;
-        best_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
-    }
-    if (cost_r3 < min_cost) {
-        min_cost = cost_r3;
-        best_regime = Regime::REGIME_3_ULTRA_LOW_SURVIVAL;
+        if (cost < min_cost) {
+            min_cost = cost;
+            optimal_regime = r;
+        }
     }
 
     out_optimal_cost = min_cost;
-    return best_regime;
+    return optimal_regime;
 }
 
 StepDecision AMUQuantController::on_token_step(
     uint32_t token_step,
     uint32_t current_seq_len,
-    const KVVectorExtractor& extractor,
     const KVSeqRmFunc& seq_rm,
     const KVSeqAddFunc& seq_add
 ) {
     StepDecision decision;
-    decision.regime = current_regime_;
-    decision.prefetch_depth = prefetch_depth_;
-    decision.aggressive_evict = aggressive_evict_;
-    decision.phi_score = last_phi_;
     decision.policy_used = config_.policy;
+    decision.calibration_factor = adaptive_calib_factor_;
 
-    // Sample telemetry at scheduled token stride
-    if (token_step % config_.eval_interval_tokens != 0 && !first_eval_) {
+    if (token_step % config_.eval_interval_tokens != 0) {
+        decision.regime = current_regime_;
+        decision.prefetch_depth = prefetch_depth_;
+        decision.aggressive_evict = aggressive_evict_;
+        decision.phi_score = last_phi_;
         return decision;
     }
 
-    MemoryStats stats = telemetry_->sample();
-    double now = stats.timestamp_sec;
-    
-    double elapsed_sec = first_eval_ ? 1.0 : (now - last_eval_time_);
-    double delta_rss = first_eval_ ? 0.0 : static_cast<double>(stats.process_rss_bytes) - static_cast<double>(last_eval_rss_);
-    
-    last_eval_time_ = now;
-    last_eval_rss_ = stats.process_rss_bytes;
-    first_eval_ = false;
+    MemoryStats current_stats = telemetry_ ? telemetry_->sample() : MemoryStats{};
+    double current_time = current_stats.timestamp_sec;
 
-    // Evaluate predictive pressure score Phi_t
-    double phi = compute_phi_score(stats, elapsed_sec, delta_rss);
+    double elapsed_sec = 0.1;
+    double delta_rss = 0.0;
+
+    if (!first_eval_) {
+        elapsed_sec = current_time - last_eval_time_;
+        delta_rss = static_cast<double>(current_stats.process_rss_bytes) - static_cast<double>(last_eval_rss_);
+    } else {
+        first_eval_ = false;
+    }
+
+    last_eval_time_ = current_time;
+    last_eval_rss_ = current_stats.process_rss_bytes;
+
+    double phi = compute_phi_score(current_stats, elapsed_sec, delta_rss);
     last_phi_ = phi;
     decision.phi_score = phi;
 
     Regime target_regime = current_regime_;
 
     if (config_.policy == ArbitrationPolicy::PREDICTIVE_COST_BENEFIT) {
-        double optimal_cost = 0.0;
-        target_regime = arbitrate_predictive_cost_benefit(stats, elapsed_sec, delta_rss, current_seq_len, optimal_cost);
-        decision.selected_utility_cost = optimal_cost;
+        double optimal_utility = 0.0;
+        target_regime = arbitrate_predictive_cost_benefit(
+            current_stats, elapsed_sec, delta_rss, current_seq_len, optimal_utility
+        );
+        decision.selected_utility_cost = optimal_utility;
     } else if (config_.policy == ArbitrationPolicy::STATIC_KV_ONLY) {
-        // Naive attention-eviction: evicts unconditionally whenever context exceeds recent window
         if (current_seq_len > config_.attention_sink_tokens + config_.recent_window_tokens) {
             target_regime = Regime::REGIME_2_BALANCED_OFFLOAD;
         } else {
             target_regime = Regime::REGIME_1_HIGH_THROUGHPUT;
         }
     } else {
-        // THRESHOLD_HYSTERESIS: Standard FSM state machine
+        // THRESHOLD_HYSTERESIS
         switch (current_regime_) {
             case Regime::REGIME_1_HIGH_THROUGHPUT:
                 if (phi > config_.theta_high) {
@@ -293,14 +285,13 @@ StepDecision AMUQuantController::on_token_step(
         }
     }
 
-    apply_regime_transition(target_regime, current_seq_len, extractor, seq_rm, seq_add, decision);
+    apply_regime_transition(target_regime, current_seq_len, seq_rm, seq_add, decision);
     return decision;
 }
 
 void AMUQuantController::apply_regime_transition(
     Regime target,
     uint32_t current_seq_len,
-    const KVVectorExtractor& extractor,
     const KVSeqRmFunc& seq_rm,
     const KVSeqAddFunc& seq_add,
     StepDecision& decision
@@ -329,7 +320,6 @@ void AMUQuantController::apply_regime_transition(
             decision.prefetch_depth = 1;
             decision.aggressive_evict = true;
 
-            // Evict middle tokens to compressed TurboQuant index
             if (kv_surgeon_) {
                 auto range = kv_surgeon_->plan_eviction(
                     current_seq_len,
@@ -340,9 +330,9 @@ void AMUQuantController::apply_regime_transition(
                 if (range.valid()) {
                     uint32_t count = static_cast<uint32_t>(range.p_end - range.p_start);
                     last_estimated_savings_bytes_ = static_cast<uint64_t>(
-                        static_cast<double>(count * bytes_per_token) * 0.85 * adaptive_calib_factor_
+                        static_cast<double>(count * bytes_per_token) * adaptive_calib_factor_
                     );
-                    bool ok = kv_surgeon_->execute_eviction(range, extractor, seq_rm, seq_add);
+                    bool ok = kv_surgeon_->execute_eviction(range, seq_rm, seq_add);
                     decision.kv_pruned = ok;
                     if (ok) {
                         record_actual_reclaimed(count * bytes_per_token);
@@ -358,16 +348,6 @@ void AMUQuantController::apply_regime_transition(
             decision.prefetch_depth = 0;
             decision.aggressive_evict = true;
 
-            // In-place requantization to 2-bit representation
-            if (current_bit_width_ == 4 && turbovec_idx_ != nullptr) {
-                if (kv_surgeon_) {
-                    kv_surgeon_->flush_archiver();
-                }
-                turbovec_requantize_to_2bit(turbovec_idx_);
-                current_bit_width_ = 2;
-                decision.requantized_to_2bit = true;
-            }
-
             // Evict KV tokens under compressed recent window
             if (kv_surgeon_) {
                 auto range = kv_surgeon_->plan_eviction(
@@ -379,9 +359,9 @@ void AMUQuantController::apply_regime_transition(
                 if (range.valid()) {
                     uint32_t count = static_cast<uint32_t>(range.p_end - range.p_start);
                     last_estimated_savings_bytes_ = static_cast<uint64_t>(
-                        static_cast<double>(count * bytes_per_token) * 0.93 * adaptive_calib_factor_
+                        static_cast<double>(count * bytes_per_token) * adaptive_calib_factor_
                     );
-                    bool ok = kv_surgeon_->execute_eviction(range, extractor, seq_rm, seq_add);
+                    bool ok = kv_surgeon_->execute_eviction(range, seq_rm, seq_add);
                     decision.kv_pruned = ok;
                     if (ok) {
                         record_actual_reclaimed(count * bytes_per_token);
@@ -414,7 +394,6 @@ void AMUQuantController::reset() {
     last_phi_ = 0.0;
     prefetch_depth_ = 3;
     aggressive_evict_ = false;
-    current_bit_width_ = config_.initial_bit_width;
     last_eval_time_ = 0.0;
     last_eval_rss_ = 0;
     first_eval_ = true;

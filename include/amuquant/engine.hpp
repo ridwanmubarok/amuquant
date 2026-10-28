@@ -12,8 +12,6 @@
 #include "amuquant/kv_surgeon.hpp"
 #include "amuquant/controller.hpp"
 #include "amuquant/canonical_history.hpp"
-#include "amuquant/turboquant.hpp"
-#include "amuquant/turbovec_ffi.h"
 
 #include <memory>
 #include <string>
@@ -23,7 +21,6 @@ namespace amuquant {
 struct EngineMetrics {
     uint32_t total_tokens_generated{0};
     uint32_t total_kv_evictions{0};
-    uint32_t total_turbovec_queries{0};
     double total_inter_token_latency_ms{0.0};
     double avg_inter_token_latency_ms{0.0};
     uint64_t peak_rss_bytes{0};
@@ -37,7 +34,7 @@ public:
     ~AMUQuantEngine();
 
     /**
-     * @brief Initializes subcomponents, allocates the TurboQuant vector index, and tests telemetry.
+     * @brief Initializes subcomponents (telemetry, layer manager, kv surgeon, controller).
      */
     Status initialize();
 
@@ -58,44 +55,20 @@ public:
     StepDecision step_token(
         uint32_t token_step,
         uint32_t current_seq_len,
-        const KVVectorExtractor& extractor,
         const KVSeqRmFunc& seq_rm,
         const KVSeqAddFunc& seq_add
     );
-
-    /**
-     * @brief Queries the compressed TurboQuant vector index for evicted context chunks.
-     */
-    std::vector<SearchResult> recall_context(const float* query_data, uint32_t top_k);
 
     /**
      * @brief Records a verbatim conversational turn into the canonical history store.
      */
     uint64_t record_turn(const std::string& role, const std::string& content, int32_t token_start, int32_t token_end);
 
-    /**
-     * @brief Performs query-driven hybrid retrieval (dense TurboQuant + lexical keyword) over evicted turns.
-     */
-    std::vector<RetrievedMemory> query_hybrid_memory(
-        const std::string& query_text,
-        const float* query_embedding,
-        uint32_t top_k = 3,
-        float dense_weight = 0.6f,
-        float lexical_weight = 0.4f
-    );
-
-    /**
-     * @brief Generates an explicit structured system memory context block from retrieved evicted turns.
-     */
-    std::string reconstruct_memory_prompt(
-        const std::string& query_text,
-        const float* query_embedding,
-        uint32_t top_k = 3
-    );
-
     EngineMetrics get_metrics() const;
 
-    TurbovecIndexHandle* get_turbovec_handle() { return turbovec_handle_; }
+    std::vector<SearchResult> recall_context(const float* = nullptr, uint32_t = 0) { return {}; }
+    std::string reconstruct_memory_prompt(const std::string& = "", const float* = nullptr, uint32_t = 0) { return ""; }
+
     std::shared_ptr<SystemTelemetry> get_telemetry() { return telemetry_; }
     std::shared_ptr<LayerManager> get_layer_manager() { return layer_mgr_; }
     std::shared_ptr<KVSurgeon> get_kv_surgeon() { return kv_surgeon_; }
@@ -110,7 +83,6 @@ public:
 
 private:
     AMUQuantConfig config_;
-    TurbovecIndexHandle* turbovec_handle_{nullptr};
     std::shared_ptr<SystemTelemetry> telemetry_;
     std::shared_ptr<LayerManager> layer_mgr_;
     std::shared_ptr<KVSurgeon> kv_surgeon_;

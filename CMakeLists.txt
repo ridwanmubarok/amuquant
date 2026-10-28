@@ -21,31 +21,9 @@ endif()
 # Header Include Directories
 include_directories(include)
 
-# Backend Configuration: Canonical Native C++17 SIMD (default) vs Optional Rust FFI
-option(AMUQUANT_USE_RUST_BACKEND "Link turbovec-ffi Rust static library instead of native C++ SIMD backend" OFF)
-
-if(AMUQUANT_USE_RUST_BACKEND)
-    find_program(CARGO_BIN cargo)
-    if(NOT CARGO_BIN)
-        message(FATAL_ERROR "AMUQUANT_USE_RUST_BACKEND is ON, but 'cargo' was not found in PATH. Install Rust or build with -DAMUQUANT_USE_RUST_BACKEND=OFF.")
-    endif()
-    message(STATUS "Configuring AMU-QUANT with turbovec-ffi Rust backend via Cargo: ${CARGO_BIN}")
-    add_custom_target(turbovec_ffi_rust ALL
-        COMMAND ${CARGO_BIN} build --release --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi/Cargo.toml
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi
-        COMMENT "Building turbovec-ffi Rust crate via Cargo"
-    )
-    set(TURBOVEC_RUST_LIB "${CMAKE_CURRENT_SOURCE_DIR}/turbovec-ffi/target/release/libturbovec_ffi.a")
-    add_compile_definitions(AMUQUANT_BACKEND_RUST=1)
-else()
-    message(STATUS "Configuring AMU-QUANT with canonical native C++17 SIMD Lloyd-Max backend (zero external dependencies).")
-endif()
-
-# AMU-QUANT Core Library
+# AMU-QUANT Core Library (Native C++17, Zero Rust / FFI Dependencies)
 set(AMUQUANT_SOURCES
     src/telemetry.cpp
-    src/turboquant.cpp
-    src/turbovec_ffi.cpp
     src/canonical_history.cpp
     src/layer_manager.cpp
     src/kv_surgeon.cpp
@@ -56,16 +34,6 @@ set(AMUQUANT_SOURCES
 
 add_library(amuquant_core STATIC ${AMUQUANT_SOURCES})
 target_include_directories(amuquant_core PUBLIC 
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
-
-# C-ABI Shared Library for FFI (turbovec_ffi)
-add_library(turbovec_ffi SHARED
-    src/turboquant.cpp
-    src/turbovec_ffi.cpp
-)
-target_include_directories(turbovec_ffi PUBLIC 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
@@ -130,10 +98,6 @@ endif()
 # Unit Tests Suite
 enable_testing()
 
-add_executable(test_turboquant tests/test_turboquant.cpp)
-target_link_libraries(test_turboquant PRIVATE amuquant_core)
-add_test(NAME test_turboquant COMMAND test_turboquant)
-
 add_executable(test_controller tests/test_controller.cpp)
 target_link_libraries(test_controller PRIVATE amuquant_core)
 add_test(NAME test_controller COMMAND test_controller)
@@ -146,7 +110,7 @@ add_test(NAME test_amuquant_pipeline COMMAND test_amuquant_pipeline)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-install(TARGETS amuquant_core turbovec_ffi
+install(TARGETS amuquant_core
     EXPORT amuquantTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

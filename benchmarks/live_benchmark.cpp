@@ -734,7 +734,7 @@ int main(int argc, char** argv) {
                 engine.append_token(n_prompt + step);
 
                 int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-                engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+                engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
                 llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
                 batch.n_tokens = 1;
@@ -1011,7 +1011,7 @@ int main(int argc, char** argv) {
 
                     engine.append_token(agent_embeddings.size());
                     int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-                    engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+                    engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
                     llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
                     batch.n_tokens = 1;
@@ -1205,7 +1205,7 @@ int main(int argc, char** argv) {
             engine.append_token(n_prompt + step);
 
             int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-            StepDecision dec = engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+            StepDecision dec = engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
             if (dec.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL && !mock_stress_res.survival_mode_triggered) {
                 mock_stress_res.survival_mode_triggered = true;
@@ -1269,7 +1269,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        turbovec_get_memory_usage(engine.get_turbovec_handle(), &mock_stress_res.turbovec_bytes_2bit);
+        // turbovec vector memory usage removed
 
         llama_batch_free(batch);
         llama_sampler_free(smpl);
@@ -1409,7 +1409,7 @@ int main(int argc, char** argv) {
             engine.append_token(n_prompt + step);
 
             int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-            StepDecision dec = engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+            StepDecision dec = engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
             if (dec.regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL && !real_stress_res.survival_mode_triggered) {
                 real_stress_res.survival_mode_triggered = true;
@@ -1477,7 +1477,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        turbovec_get_memory_usage(engine.get_turbovec_handle(), &real_stress_res.turbovec_bytes_2bit);
+        // turbovec vector memory usage removed
 
         llama_batch_free(batch);
         llama_sampler_free(smpl);
@@ -1604,7 +1604,7 @@ int main(int argc, char** argv) {
 
                 engine.append_token(n_prompt + step);
                 int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-                StepDecision dec = engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+                StepDecision dec = engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
                 abl_res.selected_cost = dec.selected_utility_cost;
 
                 llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
@@ -1834,7 +1834,7 @@ int main(int argc, char** argv) {
 
                 engine.append_token(n_ext_prompt + step);
                 int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-                engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+                engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
                 llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
                 batch.n_tokens = 1;
@@ -2028,7 +2028,7 @@ int main(int argc, char** argv) {
 
                 engine.append_token(n_lc_prompt + step);
                 int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-                engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+                engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
 
                 llama_pos next_pos = llama_memory_seq_pos_max(mem, 0) + 1;
                 batch.n_tokens = 1;
@@ -2235,7 +2235,7 @@ int main(int argc, char** argv) {
 
                 if (cfg_setup.enable_eviction) {
                     int32_t current_physical_len = llama_memory_seq_pos_max(mem, 0) + 1;
-                    engine.step_token(n_past, current_physical_len, extractor, seq_rm, seq_add);
+                    engine.step_token(n_past, current_physical_len, seq_rm, seq_add);
                 }
                 n_past++;
             }

@@ -1,13 +1,12 @@
 /**
  * @file kv_surgeon.hpp
- * @brief Dynamic KV-cache eviction-to-index surgery and RoPE positional realignment.
+ * @brief Dynamic KV-cache sliding window eviction surgery and RoPE positional realignment.
  */
 
 #ifndef AMUQUANT_KV_SURGEON_HPP
 #define AMUQUANT_KV_SURGEON_HPP
 
 #include "amuquant/types.hpp"
-#include "amuquant/turbovec_ffi.h"
 
 #include <cstdint>
 #include <vector>
@@ -15,8 +14,6 @@
 #include <memory>
 
 namespace amuquant {
-
-class AsyncArchiver;
 
 struct EvictionRange {
     int32_t p_start{-1};
@@ -26,15 +23,15 @@ struct EvictionRange {
 
 struct KVSurgeryStats {
     uint32_t active_kv_tokens{0};
+    uint32_t total_pruned_tokens{0};
     uint32_t archived_chunks{0};
     int32_t current_rope_shift{0};
     uint64_t kv_memory_bytes{0};
-    uint64_t turbovec_memory_bytes{0};
 };
 
 /**
  * @brief Thread-safe mapping between physical KV-cache slots and immutable logical token IDs.
- * Decouples shifting physical positions from logical context and vector index identifiers.
+ * Decouples shifting physical positions from logical context.
  */
 class TokenIndexMap {
 public:
@@ -97,15 +94,14 @@ private:
     std::vector<uint64_t> physical_to_logical_;
 };
 
-using KVVectorExtractor = std::function<const float*(int32_t token_pos)>;
 using KVSeqRmFunc = std::function<bool(int32_t p0, int32_t p1)>;
 using KVSeqAddFunc = std::function<bool(int32_t p0, int32_t p1, int32_t delta)>;
 using KVEvictionCallback = std::function<void(const std::vector<uint64_t>& evicted_logical_ids)>;
 
 class KVSurgeon {
 public:
-    KVSurgeon(TurbovecIndexHandle* turbovec_idx, uint32_t embedding_dim, bool enable_async = true);
-    ~KVSurgeon();
+    KVSurgeon();
+    ~KVSurgeon() = default;
 
     /**
      * @brief Computes middle-token eviction bounds preserving initial sink tokens and recent window.
@@ -113,27 +109,20 @@ public:
     EvictionRange plan_eviction(uint32_t current_token_len, uint32_t sink_size, uint32_t recent_window, uint32_t min_batch = 1) const;
 
     /**
-     * @brief Extracts candidate KV tokens into TurboQuant index, prunes cache sequence, and applies RoPE delta.
-     * Guaranteed 2-phase transactional commit with atomic rollback: validates and stages representations
-     * before altering KV-cache. If any vector insertion or sequence operation fails, previously inserted
-     * vectors are rolled back from the index, maintaining zero data corruption.
+     * @brief Prunes middle KV cache sequence and applies RoPE positional realignment.
+     * Transactional execution: validates parameters and executes sequence removal and realignment.
+     * Updates physical-to-logical token mappings atomically.
      */
     bool execute_eviction(
         const EvictionRange& range,
-        const KVVectorExtractor& extractor,
         const KVSeqRmFunc& seq_rm,
         const KVSeqAddFunc& seq_add
     );
 
     /**
-     * @brief Flushes any pending background archival tasks to ensure index consistency.
+     * @brief Returns active KV memory metrics.
      */
-    void flush_archiver();
-
-    /**
-     * @brief Returns active KV and compressed index memory metrics.
-     */
-    KVSurgeryStats get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim) const;
+    KVSurgeryStats get_stats(uint32_t num_layers, uint32_t kv_heads, uint32_t head_dim, uint32_t bytes_per_element = 2) const;
 
     TokenIndexMap& get_token_map() { return token_map_; }
     const TokenIndexMap& get_token_map() const { return token_map_; }
@@ -143,13 +132,10 @@ public:
     void reset();
 
 private:
-    TurbovecIndexHandle* turbovec_idx_{nullptr};
-    uint32_t embedding_dim_{4096};
-    uint32_t total_archived_tokens_{0};
     uint32_t active_tokens_{0};
+    uint32_t total_pruned_tokens_{0};
     int32_t cumulative_rope_shift_{0};
     TokenIndexMap token_map_;
-    std::unique_ptr<AsyncArchiver> async_archiver_;
     KVEvictionCallback eviction_cb_;
 };
 

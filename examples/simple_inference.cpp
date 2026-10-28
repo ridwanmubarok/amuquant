@@ -16,7 +16,7 @@ int main() {
     cfg.min_recent_window_tokens = 12;
     cfg.attention_sink_tokens = 4;
 
-    // 2. Initialize engine and allocate vector index
+    // 2. Initialize engine
     amuquant::AMUQuantEngine engine(cfg);
     if (engine.initialize() != amuquant::Status::OK) {
         std::cerr << "Failed to initialize AMUQuantEngine.\n";
@@ -24,7 +24,7 @@ int main() {
     }
 
     std::cout << "AMU-QUANT Engine successfully initialized.\n";
-    std::cout << "Ready for memory-compressed inference with TurboQuant vector indexing.\n";
+    std::cout << "Ready for host-aware co-adaptive memory-managed inference.\n";
 
     return 0;
 }

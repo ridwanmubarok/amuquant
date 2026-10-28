@@ -22,6 +22,7 @@ struct StandaloneKVCache {
     std::vector<std::vector<uint16_t>> token_slots;
     std::vector<int32_t> slot_positions;
     size_t total_reclaimed_bytes{0};
+    uint32_t tokens_pruned{0};
 
     void append_token() {
         int32_t next_pos = slot_positions.empty() ? 0 : (slot_positions.back() + 1);
@@ -37,6 +38,7 @@ struct StandaloneKVCache {
             int32_t p = slot_positions[i];
             if (p >= p0 && p < p1) {
                 total_reclaimed_bytes += (embedding_dim * sizeof(uint16_t));
+                tokens_pruned++;
             } else {
                 remaining_slots.push_back(std::move(token_slots[i]));
                 remaining_pos.push_back(p);
@@ -66,9 +68,7 @@ struct StandaloneBenchmarkResult {
     size_t peak_kv_memory_kb{0};
     size_t final_kv_memory_kb{0};
     size_t kv_memory_reclaimed_kb{0};
-    uint32_t tokens_archived{0};
-    double recall_score{0.0};
-    double recall_latency_us{0.0};
+    uint32_t tokens_pruned{0};
     Regime final_regime{Regime::REGIME_1_HIGH_THROUGHPUT};
 };
 
@@ -93,38 +93,13 @@ int main(int argc, char** argv) {
     constexpr uint32_t EMBEDDING_DIM = 1024;
     constexpr uint32_t NUM_LAYERS = 32;
     constexpr size_t REAL_LAYER_BYTES = 1024 * 1024; // 1 MB physical resident pages per layer (32 MB total)
-    constexpr uint32_t NEEDLE_POS = 12;
-
-    // Synthetic Needle vector
-    std::vector<std::vector<float>> context_tokens(total_tokens, std::vector<float>(EMBEDDING_DIM, 0.0f));
-    std::mt19937 needle_rng(8888);
-    std::normal_distribution<float> needle_dist(0.0f, 1.0f);
-    for (uint32_t d = 0; d < EMBEDDING_DIM; ++d) {
-        context_tokens[NEEDLE_POS][d] = needle_dist(needle_rng);
-    }
-    for (uint32_t t = 0; t < total_tokens; ++t) {
-        if (t != NEEDLE_POS) {
-            std::mt19937 bg_rng(300 + t);
-            std::normal_distribution<float> bg_dist(0.0f, 1.0f);
-            for (uint32_t d = 0; d < EMBEDDING_DIM; ++d) {
-                context_tokens[t][d] = bg_dist(bg_rng);
-            }
-        }
-    }
-
-    auto valid_extractor = [&](int32_t pos) -> const float* {
-        if (pos >= 0 && pos < static_cast<int32_t>(context_tokens.size())) {
-            return context_tokens[pos].data();
-        }
-        return nullptr;
-    };
 
     // =========================================================================
     // RUN 1: UNMANAGED LINEAR CONTEXT INFERENCE (Standard Vanilla Transformer)
     // =========================================================================
     std::cout << "[RUN 1/2] Executing Unmanaged Linear Context Expansion..." << std::endl;
     StandaloneBenchmarkResult unmanaged_res;
-    unmanaged_res.name = "Unmanaged Baseline (Vanilla)";
+    unmanaged_res.name = "Unmanaged Baseline (llama.cpp passive)";
     {
         StandaloneKVCache kv_cache;
         kv_cache.embedding_dim = EMBEDDING_DIM;
@@ -144,7 +119,7 @@ int main(int argc, char** argv) {
         unmanaged_res.throughput_tok_s = (unmanaged_res.duration_sec > 0) ? (total_tokens / unmanaged_res.duration_sec) : 0.0;
         unmanaged_res.final_kv_memory_kb = kv_cache.memory_bytes() / 1024;
         unmanaged_res.kv_memory_reclaimed_kb = 0;
-        unmanaged_res.tokens_archived = 0;
+        unmanaged_res.tokens_pruned = 0;
     }
     std::cout << "  - Unmanaged Baseline Completed: Peak KV Memory = " << unmanaged_res.peak_kv_memory_kb << " KB (Unbounded Expansion)\n\n";
 
@@ -223,7 +198,7 @@ int main(int argc, char** argv) {
             }
             telemetry->set_mock_stats(s);
 
-            engine.step_token(t, static_cast<uint32_t>(kv_cache.active_slots()), valid_extractor, seq_rm, seq_add);
+            engine.step_token(t, static_cast<uint32_t>(kv_cache.active_slots()), seq_rm, seq_add);
 
             size_t cur_mem_kb = kv_cache.memory_bytes() / 1024;
             if (cur_mem_kb > amuquant_res.peak_kv_memory_kb) {
@@ -237,17 +212,8 @@ int main(int argc, char** argv) {
         amuquant_res.throughput_tok_s = (amuquant_res.duration_sec > 0) ? (total_tokens / amuquant_res.duration_sec) : 0.0;
         amuquant_res.final_kv_memory_kb = kv_cache.memory_bytes() / 1024;
         amuquant_res.kv_memory_reclaimed_kb = kv_cache.total_reclaimed_bytes / 1024;
-        amuquant_res.tokens_archived = engine.get_kv_surgeon()->get_stats(NUM_LAYERS, 8, 128).archived_chunks;
+        amuquant_res.tokens_pruned = kv_cache.tokens_pruned;
         amuquant_res.final_regime = engine.get_controller()->get_current_regime();
-
-        // Test Semantic Retrieval of Needle Fact
-        auto t_rec_start = std::chrono::high_resolution_clock::now();
-        auto hits = engine.recall_context(context_tokens[NEEDLE_POS].data(), 1);
-        auto t_rec_end = std::chrono::high_resolution_clock::now();
-        amuquant_res.recall_latency_us = std::chrono::duration<double, std::micro>(t_rec_end - t_rec_start).count();
-        if (!hits.empty() && hits[0].id == NEEDLE_POS) {
-            amuquant_res.recall_score = hits[0].score;
-        }
 
         // Clean up mmap layers
         for (uint32_t l = 0; l < NUM_LAYERS; ++l) {
@@ -256,7 +222,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::cout << "  - AMU-QUANT Completed: Reclaimed KV Memory = " << amuquant_res.kv_memory_reclaimed_kb << " KB | Tokens Archived = " << amuquant_res.tokens_archived << "\n\n";
+    std::cout << "  - AMU-QUANT Completed: Reclaimed KV Memory = " << amuquant_res.kv_memory_reclaimed_kb << " KB | Tokens Pruned = " << amuquant_res.tokens_pruned << "\n\n";
 
     // =========================================================================
     // COMPARATIVE SUMMARY REPORT
@@ -280,15 +246,12 @@ int main(int argc, char** argv) {
     std::cout << std::left << std::setw(34) << "Physical KV Memory Reclaimed"
               << std::setw(24) << "0 KB (None)"
               << std::setw(24) << (std::to_string(amuquant_res.kv_memory_reclaimed_kb) + " KB") << "\n";
-    std::cout << std::left << std::setw(34) << "Tokens Safely Archived"
+    std::cout << std::left << std::setw(34) << "Tokens Pruned via Window"
               << std::setw(24) << "0 (None)"
-              << std::setw(24) << amuquant_res.tokens_archived << "\n";
-    std::cout << std::left << std::setw(34) << "Needle Context Recall Score"
-              << std::setw(24) << "N/A"
-              << std::setw(24) << (std::to_string(amuquant_res.recall_score) + " (Cosine)") << "\n";
-    std::cout << std::left << std::setw(34) << "SIMD Retrieval Latency"
-              << std::setw(24) << "N/A"
-              << std::setw(24) << (std::to_string(amuquant_res.recall_latency_us) + " us") << "\n";
+              << std::setw(24) << amuquant_res.tokens_pruned << "\n";
+    std::cout << std::left << std::setw(34) << "KV Cache Complexity"
+              << std::setw(24) << "O(N) (Unbounded)"
+              << std::setw(24) << "O(1) (Bounded Working Set)" << "\n";
     std::cout << "================================================================================\n" << std::endl;
 
     // Export report
@@ -304,9 +267,8 @@ int main(int argc, char** argv) {
         rpt << "| **Peak KV-Cache Memory** | " << unmanaged_res.peak_kv_memory_kb << " KB | " << amuquant_res.peak_kv_memory_kb << " KB |\n";
         rpt << "| **Final KV-Cache Memory** | " << unmanaged_res.final_kv_memory_kb << " KB | " << amuquant_res.final_kv_memory_kb << " KB |\n";
         rpt << "| **Physical RAM Reclaimed** | 0 KB | " << amuquant_res.kv_memory_reclaimed_kb << " KB |\n";
-        rpt << "| **Tokens Safely Archived** | 0 tokens | " << amuquant_res.tokens_archived << " tokens |\n";
-        rpt << "| **Needle Retrieval Score** | N/A | " << amuquant_res.recall_score << " (Cosine Match) |\n";
-        rpt << "| **SIMD Retrieval Latency** | N/A | " << amuquant_res.recall_latency_us << " µs |\n\n";
+        rpt << "| **Tokens Pruned via Window** | 0 tokens | " << amuquant_res.tokens_pruned << " tokens |\n";
+        rpt << "| **KV Complexity Bound** | O(N) Linear Growth | O(1) Bounded Working Set |\n\n";
         rpt << "Generated automatically by `amuquant_benchmark`.\n";
         rpt.close();
         std::cout << "[INFO] Standalone report exported to benchmarks/standalone_benchmark_report.md\n";
