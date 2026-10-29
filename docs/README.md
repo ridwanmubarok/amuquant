@@ -8,10 +8,10 @@ This directory contains the scientific specifications, mathematical formulations
 
 | Index | Document | Summary |
 |:---:|:---|:---|
-| **01** | [**System Architecture**](01_SYSTEM_ARCHITECTURE.md) | High-level native C++17 subsystem layout (Telemetry, Layer Manager, KV Surgeon, Controller, Canonical History), memory boundaries, and thread-safety invariants. |
-| **02** | [**Mathematical Model & Controller**](02_MATHEMATICAL_MODEL_AND_CONTROLLER.md) | Dual-budget memory equilibrium inequality, predictive pressure metric $\Phi_t$, cost-benefit utility $J(a)$, hysteresis state transitions, and scheduling algorithm. |
-| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds, empirical benchmarks (Triad: llama.cpp vs. AirLLM vs. AMU-QUANT), host memory starvation protocols, and metrics. |
-| **05** | [**Literature Review & References**](05_LITERATURE_REVIEW_AND_REFERENCES.md) | Critical comparative analysis against AirLLM, llama.cpp mmap, attention sinking (StreamingLLM, H2O, ThinKV), computer systems memory modeling, and verified academic references. |
+| **01** | [**System Architecture**](01_SYSTEM_ARCHITECTURE.md) | High-level native C++17 subsystem layout (Telemetry, Layer Manager, KV Surgeon, Controller, Canonical History & FactRegister), memory boundaries, and thread-safety invariants. |
+| **02** | [**Mathematical Model & Controller**](02_MATHEMATICAL_MODEL_AND_CONTROLLER.md) | Dual-budget memory equilibrium inequality, predictive pressure metric $\Phi_t$, cost-benefit utility $J(a)$, temporal conflict state space, evidence threshold $\tau_{\text{evidence}}$, and scheduling algorithm. |
+| **04** | [**Experimental Methodology**](04_EXPERIMENTAL_METHODOLOGY.md) | Hardware testbeds, empirical benchmarks (Triad Benchmark & Scenario 4 Tri-Dimensional Reliability Benchmark inspired by HaluMem), host memory starvation protocols, and metrics. |
+| **05** | [**Literature Review & References**](05_LITERATURE_REVIEW_AND_REFERENCES.md) | Critical comparative analysis against AirLLM, llama.cpp mmap, attention sinking (StreamingLLM, H2O, ThinKV), reliable local memory architectures (HaluMem), computer systems memory modeling, and verified academic references. |
 
 ---
 

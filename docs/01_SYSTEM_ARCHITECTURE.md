@@ -106,24 +106,22 @@ Unlike methods that discard tokens into an unrecoverable trash buffer (e.g., Str
 * **Microsecond Execution Performance**:
   - Measured execution latency of the complete surgery sequence is $\approx 100\ \mu\text{s}$ ($0.10\text{ ms}$), contributing $< 0.2\%$ overhead relative to normal single-token decode latency ($\approx 50\text{ ms}$).
 
-### 2.3 Subsystem 3: Canonical History Store & Query-Driven Context Reconstruction
-Solves the fundamental trade-off between KV-cache pruning and factual hallucination:
+### 2.3 Subsystem 3: Reliable Semantic Memory, Provenance Tracking & Grounding Guardrail
+Solves the fundamental failure modes small local language models face during extended multi-turn interactions (lost facts from KV pruning, temporal knowledge clash from outdated facts, and ungrounded hallucinations):
 
-* **The Problem**: Excising intermediate tokens sever attention pathways. Without access to past tokens, autoregressive generation hallucinates when queried about past dialogue details.
-* **Canonical History Store (`CanonicalHistoryStore`)**:
+* **The Problem**: Excising intermediate tokens severs attention pathways. Small models (such as Qwen 2.5 3B) not only lose facts when slots are evicted, but also frequently mix outdated facts with newer ones (temporal contradiction) or hallucinate arbitrary answers when retrieval evidence is insufficient.
+* **Canonical History Store (`CanonicalHistoryStore`) & Provenance Tracking**:
   - Preserves immutable ground-truth turn records (role, prompt text, response text, token index intervals) in host virtual memory.
   - Automatically flags turns as `is_evicted_from_kv = true` when their attention positions are pruned from the physical KV cache.
-* **Query-Driven Lexical Retrieval**:
-  - Uses keyword extraction, entity recognition, and BM25-style frequency scoring over stored turns to locate facts relevant to incoming user queries.
-  - Filters candidate turns to prioritize information currently absent from the physical attention buffer.
-* **Context Reconstruction (Retrieval-to-Prompt)**:
-  - Formats retrieved historical turns into a structured system memory block:
-    ```markdown
-    [Memori Percakapan Terkait (Riwayat yang Diarsipkan)]:
-    - [Turn 1] user: Deploy automated protocol. Master key is AegisOmega-90412.
-    Instruksi Penting: Gunakan fakta historis di atas untuk menjawab jika relevan.
-    ```
-  - Re-injects essential facts into the prompt context, restoring factual recall while keeping physical attention cache strictly bounded to an $O(1)$ working set.
+  - Attaches structured provenance tags `[Turn X | Source: Role | Status: ACTIVE]` to every recorded entity, enabling automatic citation and deterministic verification.
+* **Deterministic Entity-Slot Extraction & Fact Register**:
+  - Extracts key-value entity slots (e.g., project name, version, port, configuration parameters) in native C++ without incurring LLM forward-pass latency.
+  - Tracks temporal state space: $S_{\text{fact}} \in \{\text{ACTIVE}, \text{SUPERSEDED}, \text{CONTRADICTED}\}$.
+  - When an entity is updated in a subsequent turn (e.g. Turn 3 updates a parameter defined in Turn 0), previous entries are automatically marked `SUPERSEDED`, preventing stale knowledge from contaminating reconstructed contexts.
+* **Dual-Threshold Grounding Guardrail ($\tau_{\text{evidence}}$) & Calibrated Abstention**:
+  - Evaluates relevance score $S_{\text{rel}}$ against the calibrated evidence threshold $\tau_{\text{evidence}}$ (default: $0.25$).
+  - If $S_{\text{rel}} \ge \tau_{\text{evidence}}$: Reconstructs prompt with verified active facts, provenance citations, and explicit superseding notes.
+  - If $S_{\text{rel}} < \tau_{\text{evidence}}$ or when probed with unmentioned counterfactuals: Injects strict refusal directives (`[RELIABLE MEMORY GUARD: INSUFFICIENT EVIDENCE]`), compelling the model to acknowledge lack of information rather than fabricating ungrounded claims.
 
 ### 2.4 Subsystem 4: Virtual Memory Page Manager
 `LayerManager` encapsulates OS virtual memory primitives via `posix_madvise(DONTNEED / WILLNEED)`:

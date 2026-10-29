@@ -106,6 +106,23 @@ struct AMUQuantConfig {
     // Proactive working-set budget constraint (O(1) memory bound)
     uint32_t target_working_set_tokens{0};    // Target active KV cache slot bound (0 = disabled, > 0 = enforced bound)
     double weight_working_set_penalty{0.20};  // Penalty scale for exceeding target working-set budget
+
+    // Reliable Memory and Grounding Guardrail parameters
+    float evidence_threshold{0.25f};          // Minimum relevance score tau_evidence to consider facts verified
+    bool enable_abstention_guardrail{true};   // Inject strict grounded refusal directive when evidence is insufficient
+};
+
+/**
+ * @brief Telemetry metrics for Reliable Semantic Memory.
+ */
+struct ReliableMemoryMetrics {
+    uint32_t total_facts_registered{0};
+    uint32_t active_facts_count{0};
+    uint32_t superseded_facts_count{0};
+    uint32_t conflict_resolutions_triggered{0};
+    uint32_t abstentions_recommended{0};
+    uint32_t grounding_verifications_passed{0};
+    uint32_t grounding_verifications_failed{0};
 };
 
 struct SearchResult {

@@ -106,6 +106,10 @@ add_executable(test_amuquant_pipeline tests/test_amuquant_pipeline.cpp)
 target_link_libraries(test_amuquant_pipeline PRIVATE amuquant_core)
 add_test(NAME test_amuquant_pipeline COMMAND test_amuquant_pipeline)
 
+add_executable(test_reliable_memory tests/test_reliable_memory.cpp)
+target_link_libraries(test_reliable_memory PRIVATE amuquant_core)
+add_test(NAME test_reliable_memory COMMAND test_reliable_memory)
+
 # Installation Rules and Package Distribution
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)

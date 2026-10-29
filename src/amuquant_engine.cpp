@@ -95,7 +95,12 @@ uint64_t AMUQuantEngine::record_turn(const std::string& role, const std::string&
     if (!history_store_) {
         history_store_ = std::make_shared<CanonicalHistoryStore>();
     }
-    return history_store_->append_turn(role, content, token_start, token_end);
+    uint64_t tid = history_store_->append_turn(role, content, token_start, token_end);
+    reliable_metrics_.total_facts_registered = static_cast<uint32_t>(history_store_->get_facts(false).size());
+    reliable_metrics_.active_facts_count = static_cast<uint32_t>(history_store_->get_facts(true).size());
+    reliable_metrics_.superseded_facts_count = reliable_metrics_.total_facts_registered - reliable_metrics_.active_facts_count;
+    reliable_metrics_.conflict_resolutions_triggered = history_store_->get_conflict_count();
+    return tid;
 }
 
 std::vector<SearchResult> AMUQuantEngine::recall_context(const std::string& query_text, uint32_t top_k) {
@@ -114,41 +119,95 @@ std::vector<SearchResult> AMUQuantEngine::recall_context(const float* /*embd*/, 
     return {};
 }
 
-std::string AMUQuantEngine::reconstruct_memory_prompt(const std::string& query_text, const float* /*dense_query*/, uint32_t top_k) {
+std::string AMUQuantEngine::reconstruct_memory_prompt(const std::string& query_text, const float* /*dense_query*/, uint32_t /*top_k*/) {
     if (!history_store_ || query_text.empty()) {
         return "";
     }
 
-    auto matches = history_store_->search_lexical(query_text, /*evicted_only=*/true);
-    if (matches.empty()) {
-        matches = history_store_->search_lexical(query_text, /*evicted_only=*/false);
+    // Use grounded prompt formatting with provenance and conflict awareness
+    float rel = 0.0f;
+    bool abstain = false;
+    return history_store_->format_grounded_memory_prompt(query_text, config_.evidence_threshold, &rel, &abstain);
+}
+
+std::string AMUQuantEngine::construct_grounded_prompt(
+    const std::string& user_query,
+    float* out_relevance,
+    bool* out_abstain_recommended
+) {
+    if (!history_store_) {
+        history_store_ = std::make_shared<CanonicalHistoryStore>();
+    }
+    float rel = 0.0f;
+    bool abstain = false;
+    std::string prompt_block = history_store_->format_grounded_memory_prompt(
+        user_query,
+        config_.evidence_threshold,
+        &rel,
+        &abstain
+    );
+    if (out_relevance) *out_relevance = rel;
+    if (out_abstain_recommended) *out_abstain_recommended = abstain;
+
+    if (abstain) {
+        reliable_metrics_.abstentions_recommended++;
     }
 
-    if (matches.empty()) {
-        return "";
+    return prompt_block;
+}
+
+bool AMUQuantEngine::verify_response_grounding(const std::string& model_output, const std::string& context_block) const {
+    std::string lower_out = model_output;
+    std::transform(lower_out.begin(), lower_out.end(), lower_out.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
+
+    if (context_block.find("[RELIABLE MEMORY GUARD: INSUFFICIENT EVIDENCE]") != std::string::npos) {
+        static const std::vector<std::string> ABSTAIN_MARKERS = {
+            "tidak tahu", "tidak ditemukan", "tidak tercatat", "belum tercatat",
+            "tidak ada informasi", "tidak terdapat", "tidak disebutkan", "unknown",
+            "not mentioned", "not recorded", "cannot answer", "maaf"
+        };
+        for (const auto& marker : ABSTAIN_MARKERS) {
+            if (lower_out.find(marker) != std::string::npos) {
+                reliable_metrics_.grounding_verifications_passed++;
+                return true;
+            }
+        }
+        reliable_metrics_.grounding_verifications_failed++;
+        return false;
     }
 
-    std::vector<RetrievedMemory> memories;
-    for (const auto& match : matches) {
-        if (match.second < 0.20f) continue;
-        const auto* turn = history_store_->get_turn(match.first);
-        if (turn) {
-            RetrievedMemory m;
-            m.turn_id = turn->turn_id;
-            m.role = turn->role;
-            m.content = turn->content;
-            m.lexical_score = match.second;
-            m.combined_score = match.second;
-            memories.push_back(m);
-            if (top_k > 0 && memories.size() >= top_k) break;
+    if (history_store_) {
+        auto facts = history_store_->get_facts(false);
+        for (const auto& f : facts) {
+            if (f.status == FactStatus::SUPERSEDED) {
+                std::string lower_stale_val = f.entity_value;
+                std::transform(lower_stale_val.begin(), lower_stale_val.end(), lower_stale_val.begin(), [](unsigned char c) {
+                    return std::tolower(c);
+                });
+                if (!lower_stale_val.empty() && lower_out.find(lower_stale_val) != std::string::npos) {
+                    if (lower_out.find("supersede") == std::string::npos && lower_out.find("sebelumnya") == std::string::npos) {
+                        reliable_metrics_.grounding_verifications_failed++;
+                        return false;
+                    }
+                }
+            }
         }
     }
 
-    if (memories.empty()) {
-        return "";
-    }
+    reliable_metrics_.grounding_verifications_passed++;
+    return true;
+}
 
-    return history_store_->format_system_memory_context(memories);
+ReliableMemoryMetrics AMUQuantEngine::get_reliable_memory_metrics() const {
+    if (history_store_) {
+        reliable_metrics_.total_facts_registered = static_cast<uint32_t>(history_store_->get_facts(false).size());
+        reliable_metrics_.active_facts_count = static_cast<uint32_t>(history_store_->get_facts(true).size());
+        reliable_metrics_.superseded_facts_count = reliable_metrics_.total_facts_registered - reliable_metrics_.active_facts_count;
+        reliable_metrics_.conflict_resolutions_triggered = history_store_->get_conflict_count();
+    }
+    return reliable_metrics_;
 }
 
 EngineMetrics AMUQuantEngine::get_metrics() const {

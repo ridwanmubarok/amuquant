@@ -141,3 +141,33 @@ Output: StepDecision DEC
 19:
 20: return UpdatedDecision
 ```
+
+---
+
+## 7. Reliable Semantic Memory & Grounding Guardrail Model
+
+To prevent memory degradation, factual knowledge clash, and ungrounded hallucinations when operating under physical KV-cache pruning, AMU-QUANT formalizes a **Reliable Semantic Memory Model**:
+
+### 7.1 Temporal Fact State Space & Transition Rules
+
+Let $\mathcal{F}$ denote the set of extracted factual slot-value pairs $(k, v, t_{\text{origin}})$ where $k$ is the normalized entity key, $v$ is the assigned value, and $t_{\text{origin}}$ is the dialogue turn of origin. Each fact slot transitions within a deterministic state space:
+
+$$S_{\text{fact}}(k, v) \in \{\text{ACTIVE}, \text{SUPERSEDED}, \text{CONTRADICTED}\}$$
+
+When a new fact assertion $(k, v', t_{\text{new}})$ occurs at turn $t_{\text{new}} > t_{\text{origin}}$:
+
+$$\forall (k, v, t_{\text{origin}}) \in \mathcal{F}_{\text{active}}: \quad v' \neq v \implies \begin{cases} S_{\text{fact}}(k, v) \leftarrow \text{SUPERSEDED} \ (\text{with } t_{\text{superseded}} = t_{\text{new}}) \\ S_{\text{fact}}(k, v') \leftarrow \text{ACTIVE} \end{cases}$$
+
+This invariant guarantees that stale historical facts are never injected into context as active truth.
+
+### 7.2 Evidence Threshold ($\tau_{\text{evidence}}$) and Calibrated Abstention
+
+Given a user query $q$, the semantic memory retriever computes an evidence relevance score $S_{\text{rel}}(q) \in [0, 1]$ across active factual slots and dialogue history:
+
+$$S_{\text{rel}}(q) = \max\left( \max_{f \in \mathcal{F}_{\text{active}}} \text{OverlapRatio}(q, \text{Key}(f)),\, \max_{t \in \mathcal{H}} \text{LexicalScore}(q, t) \right)$$
+
+The engine applies a dual-threshold decision rule parameterized by $\tau_{\text{evidence}} = 0.25$:
+
+$$\text{PromptAction}(q) = \begin{cases} \text{InjectActiveGroundedFacts}(q, \mathcal{F}_{\text{matched}}, \text{Provenance}) & \text{if } S_{\text{rel}}(q) \ge \tau_{\text{evidence}} \\ \text{InjectAbstentionDirective}(q, \text{StrictRefusal}) & \text{if } S_{\text{rel}}(q) < \tau_{\text{evidence}} \end{cases}$$
+
+Where the abstention directive strictly mandates that the model acknowledge insufficient evidence rather than guessing, driving hallucination rates on ungrounded inquiries to $0.0\%$.

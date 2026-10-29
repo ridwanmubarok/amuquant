@@ -65,10 +65,19 @@ public:
     uint64_t record_turn(const std::string& role, const std::string& content, int32_t token_start, int32_t token_end);
 
     EngineMetrics get_metrics() const;
+    ReliableMemoryMetrics get_reliable_memory_metrics() const;
 
     std::vector<SearchResult> recall_context(const std::string& query_text, uint32_t top_k = 3);
     std::vector<SearchResult> recall_context(const float* embd = nullptr, uint32_t top_k = 0);
     std::string reconstruct_memory_prompt(const std::string& query_text = "", const float* dense_query = nullptr, uint32_t top_k = 3);
+
+    // Reliable Memory and Grounding Guardrail
+    std::string construct_grounded_prompt(
+        const std::string& user_query,
+        float* out_relevance = nullptr,
+        bool* out_abstain_recommended = nullptr
+    );
+    bool verify_response_grounding(const std::string& model_output, const std::string& context_block) const;
 
     std::shared_ptr<SystemTelemetry> get_telemetry() { return telemetry_; }
     std::shared_ptr<LayerManager> get_layer_manager() { return layer_mgr_; }
@@ -90,6 +99,7 @@ private:
     std::shared_ptr<AMUQuantController> controller_;
     std::shared_ptr<CanonicalHistoryStore> history_store_;
     EngineMetrics metrics_;
+    mutable ReliableMemoryMetrics reliable_metrics_;
 };
 
 } // namespace amuquant
