@@ -44,11 +44,22 @@ void LayerManager::on_layer_forward_end(uint32_t layer_idx, bool aggressive_evic
 
 void LayerManager::evict_layer_pages(LayerDescriptor& layer) {
     if (layer.addr_start != nullptr && layer.byte_len > 0) {
+        const long page_size = sysconf(_SC_PAGESIZE);
+        uintptr_t start = reinterpret_cast<uintptr_t>(layer.addr_start);
+        uintptr_t page_mask = static_cast<uintptr_t>(page_size - 1);
+        uintptr_t aligned_start = start & ~page_mask;
+        size_t offset = static_cast<size_t>(start - aligned_start);
+        size_t aligned_len = ((layer.byte_len + offset + page_mask) / page_size) * page_size;
+
         int rc = 0;
-#if defined(POSIX_MADV_DONTNEED)
-        rc = posix_madvise(layer.addr_start, layer.byte_len, POSIX_MADV_DONTNEED);
+#if defined(__APPLE__) || defined(__MACH__)
+        // On Darwin, msync with MS_INVALIDATE invalidates clean pages from the kernel page cache
+        rc = msync(reinterpret_cast<void*>(aligned_start), aligned_len, MS_INVALIDATE);
+        (void)madvise(reinterpret_cast<void*>(aligned_start), aligned_len, MADV_DONTNEED);
+#elif defined(POSIX_MADV_DONTNEED)
+        rc = posix_madvise(reinterpret_cast<void*>(aligned_start), aligned_len, POSIX_MADV_DONTNEED);
 #elif defined(MADV_DONTNEED)
-        rc = madvise(layer.addr_start, layer.byte_len, MADV_DONTNEED);
+        rc = madvise(reinterpret_cast<void*>(aligned_start), aligned_len, MADV_DONTNEED);
 #endif
         if (rc != 0) {
             // Advisory system call failed; preserve residency intent to avoid state desync
@@ -64,11 +75,18 @@ void LayerManager::prefetch_layer_pages(LayerDescriptor& layer) {
         return;
     }
     if (layer.addr_start != nullptr && layer.byte_len > 0) {
+        const long page_size = sysconf(_SC_PAGESIZE);
+        uintptr_t start = reinterpret_cast<uintptr_t>(layer.addr_start);
+        uintptr_t page_mask = static_cast<uintptr_t>(page_size - 1);
+        uintptr_t aligned_start = start & ~page_mask;
+        size_t offset = static_cast<size_t>(start - aligned_start);
+        size_t aligned_len = ((layer.byte_len + offset + page_mask) / page_size) * page_size;
+
         int rc = 0;
 #if defined(POSIX_MADV_WILLNEED)
-        rc = posix_madvise(layer.addr_start, layer.byte_len, POSIX_MADV_WILLNEED);
+        rc = posix_madvise(reinterpret_cast<void*>(aligned_start), aligned_len, POSIX_MADV_WILLNEED);
 #elif defined(MADV_WILLNEED)
-        rc = madvise(layer.addr_start, layer.byte_len, MADV_WILLNEED);
+        rc = madvise(reinterpret_cast<void*>(aligned_start), aligned_len, MADV_WILLNEED);
 #endif
         if (rc != 0) {
             // Advisory prefetch call failed; do not update intent tracking

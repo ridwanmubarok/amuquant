@@ -30,6 +30,7 @@ struct KVSurgeryStats {
     double last_surgery_latency_us{0.0};
     double total_surgery_latency_us{0.0};
     uint64_t total_surgery_count{0};
+    uint64_t failed_surgery_count{0};
     double avg_surgery_latency_us{0.0};
 };
 
@@ -131,6 +132,8 @@ public:
     TokenIndexMap& get_token_map() { return token_map_; }
     const TokenIndexMap& get_token_map() const { return token_map_; }
 
+    uint64_t get_failed_surgery_count() const { return failed_surgery_count_; }
+
     void set_eviction_callback(KVEvictionCallback cb) { eviction_cb_ = std::move(cb); }
 
     void reset();
@@ -144,6 +147,7 @@ private:
     double last_surgery_latency_us_{0.0};
     double total_surgery_latency_us_{0.0};
     uint64_t total_surgery_count_{0};
+    uint64_t failed_surgery_count_{0};
 };
 
 } // namespace amuquant

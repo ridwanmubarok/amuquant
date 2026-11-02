@@ -50,6 +50,8 @@ struct GGUFModelInfo {
     uint32_t head_dim{0};
     uint64_t tensor_count{0};
     uint64_t metadata_kv_count{0};
+    uint32_t alignment{32};
+    uint64_t tensor_data_offset{0};
     std::vector<GGUFTensorInfo> tensors;
     
     // Mapping from layer index to tensor indices

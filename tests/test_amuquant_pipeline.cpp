@@ -7,6 +7,7 @@
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 using namespace amuquant;
 
@@ -144,10 +145,186 @@ static void test_repeated_eviction_invariants() {
     std::cout << "  - Multi-Round Consecutive Evictions -> Token Mapping Monotonic: OK" << std::endl;
 }
 
+static void test_seq_add_invariant_validation() {
+    std::cout << "[TEST] Running Strict seq_add Invariant and Failure Accounting Verification..." << std::endl;
+    KVSurgeon surgeon;
+    TokenIndexMap& tmap = surgeon.get_token_map();
+    tmap.init(50); // 50 initial tokens [0..49]
+
+    int simulated_pos_max = 49;
+    int simulated_pos_min = 0;
+
+    // A. Valid RoPE realignment satisfying pos_max_after == pos_max_before + delta
+    auto valid_seq_rm = [&](int32_t /*p0*/, int32_t /*p1*/) -> bool { return true; };
+    auto strict_seq_add = [&](int32_t p0, int32_t p1, int32_t delta) -> bool {
+        int pos_max_before = simulated_pos_max;
+        int pos_min_before = simulated_pos_min;
+
+        if (pos_max_before < 0 || p0 > pos_max_before) {
+            return false;
+        }
+
+        // Apply shift
+        simulated_pos_max += delta;
+
+        int pos_max_after = simulated_pos_max;
+        int pos_min_after = simulated_pos_min;
+
+        if (pos_min_before == 0 && pos_min_after != 0) {
+            return false;
+        }
+
+        if (p1 == -1 && pos_max_after != pos_max_before + delta) {
+            return false;
+        }
+
+        return true;
+    };
+
+    EvictionRange r1{10, 30}; // Prune 20 tokens [10..30), delta = -20
+    bool ok = surgeon.execute_eviction(r1, valid_seq_rm, strict_seq_add);
+    assert(ok);
+    assert(surgeon.get_failed_surgery_count() == 0);
+    assert(tmap.physical_size() == 30);
+    assert(simulated_pos_max == 29); // 49 - 20 = 29
+
+    // B. Breached RoPE realignment where pos_max invariant is violated (e.g. backend failed shift)
+    auto faulty_seq_add = [&](int32_t /*p0*/, int32_t p1, int32_t delta) -> bool {
+        int pos_max_before = simulated_pos_max;
+        // Faulty backend does not shift pos_max!
+        int pos_max_after = simulated_pos_max; // Not updated by delta!
+
+        if (p1 == -1 && pos_max_after != pos_max_before + delta) {
+            return false; // Invariant violation detected
+        }
+        return true;
+    };
+
+    EvictionRange r2{5, 15}; // Try to prune 10 tokens [5..15)
+    bool fail_res = surgeon.execute_eviction(r2, valid_seq_rm, faulty_seq_add);
+    assert(!fail_res);
+    assert(surgeon.get_failed_surgery_count() == 1);
+    assert(tmap.physical_size() == 30); // Token map must remain unmodified (atomic rollback)
+
+    std::cout << "  - seq_add Invariant Validation & Transaction Abort on Breach: OK" << std::endl;
+}
+
+static void test_decoupled_host_memory_accounting() {
+    std::cout << "[TEST] Running Host Memory Accounting & Telemetry Failure Safety Verification..." << std::endl;
+    SystemTelemetry real_telemetry;
+    MemoryStats live_stats = real_telemetry.sample();
+
+    // 1. Verify decoupled metrics on live host
+    assert(live_stats.total_ram_bytes > 0);
+    assert(live_stats.process_rss_bytes > 0);
+    assert(live_stats.telemetry_valid == true);
+    std::cout << "  - Live Telemetry Query: RSS = " << (live_stats.process_rss_bytes / (1024 * 1024))
+              << " MB, Physical Footprint = " << (live_stats.physical_footprint_bytes / (1024 * 1024))
+              << " MB, System RAM = " << (live_stats.total_ram_bytes / (1024 * 1024)) << " MB: OK" << std::endl;
+
+    // 2. Verify controller safety under telemetry failure
+    AMUQuantConfig cfg;
+    cfg.memory_limit_bytes = 14ULL * 1024ULL * 1024ULL * 1024ULL;
+    cfg.os_reserved_bytes  = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+    cfg.eval_interval_tokens = 1;
+
+    auto telemetry = std::make_shared<SystemTelemetry>();
+    telemetry->set_mock_mode(true);
+    auto layer_mgr = std::make_shared<LayerManager>();
+    auto kv_surgeon = std::make_shared<KVSurgeon>();
+    AMUQuantController controller(cfg, telemetry, layer_mgr, kv_surgeon);
+
+    auto seq_rm = [](int32_t, int32_t) -> bool { return true; };
+    auto seq_add = [](int32_t, int32_t, int32_t) -> bool { return true; };
+
+    // Baseline step with high load
+    MemoryStats s1{};
+    s1.timestamp_sec = 10.0;
+    s1.process_rss_bytes = 10ULL * 1024ULL * 1024ULL * 1024ULL;
+    s1.total_ram_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+    s1.available_ram_bytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
+    s1.telemetry_valid = true;
+    telemetry->set_mock_stats(s1);
+
+    auto d1 = controller.on_token_step(0, 100, seq_rm, seq_add);
+    (void)d1;
+    double baseline_phi = controller.get_last_phi();
+    assert(baseline_phi > 0.5);
+
+    // Now simulate telemetry query failure (telemetry_valid = false, 0 bytes returned)
+    MemoryStats s_err{};
+    s_err.timestamp_sec = 11.0;
+    s_err.process_rss_bytes = 0;
+    s_err.available_ram_bytes = 0;
+    s_err.total_ram_bytes = 0;
+    s_err.telemetry_valid = false; // Telemetry failure!
+    telemetry->set_mock_stats(s_err);
+
+    auto d2 = controller.on_token_step(1, 100, seq_rm, seq_add);
+    assert(d2.telemetry_error == true);
+    // Crucial check: Controller did NOT falsely interpret 0 RSS as memory savings / zero pressure!
+    assert(controller.get_last_phi() == baseline_phi);
+    assert(d2.phi_score == baseline_phi);
+    std::cout << "  - Telemetry Failure Guard: Decision flagged error & preserved pressure (No False Savings): OK" << std::endl;
+}
+
+static void test_layer_paging_residency_reduction() {
+    std::cout << "[TEST] Running Layer Virtual Paging & Physical Residency Reduction Verification..." << std::endl;
+    constexpr size_t TEST_LAYER_SIZE = 4 * 1024 * 1024; // 4 MB
+    const char* tmp_path = "/tmp/amuquant_layer_test.bin";
+
+    int fd = open(tmp_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    assert(fd >= 0);
+    assert(ftruncate(fd, TEST_LAYER_SIZE) == 0);
+
+    // Initialize with data
+    std::vector<char> buf(65536, 0x42);
+    for (size_t written = 0; written < TEST_LAYER_SIZE; written += buf.size()) {
+        assert(write(fd, buf.data(), buf.size()) == static_cast<ssize_t>(buf.size()));
+    }
+
+    void* mmap_ptr = mmap(nullptr, TEST_LAYER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    assert(mmap_ptr != MAP_FAILED);
+
+    // Fault in all pages
+    volatile char sum = 0;
+    char* byte_ptr = static_cast<char*>(mmap_ptr);
+    for (size_t i = 0; i < TEST_LAYER_SIZE; i += 4096) {
+        sum += byte_ptr[i];
+    }
+    (void)sum;
+
+    LayerManager mgr;
+    mgr.register_layer(0, mmap_ptr, TEST_LAYER_SIZE);
+
+    uint64_t resident_before = mgr.get_actual_resident_bytes(0);
+    assert(resident_before > 0);
+
+    // Evict layer via on_layer_forward_end with aggressive_evict = true
+    mgr.on_layer_forward_end(0, true);
+
+    uint64_t resident_after = mgr.get_actual_resident_bytes(0);
+#if defined(__APPLE__) || defined(__MACH__)
+    // On Darwin, msync MS_INVALIDATE actively drops pages from page cache
+    assert(resident_after < resident_before);
+    std::cout << "  - Layer Paging Eviction: Verified Residency Drop from " 
+              << resident_before << " bytes to " << resident_after << " bytes via mincore(2): OK" << std::endl;
+#else
+    std::cout << "  - Layer Paging Eviction: Executed madvise DONTNEED on Layer 0: OK" << std::endl;
+#endif
+
+    munmap(mmap_ptr, TEST_LAYER_SIZE);
+    close(fd);
+    unlink(tmp_path);
+}
+
 int main() {
     test_eviction_and_rope_realignment();
     test_atomic_rollback_on_failure();
     test_repeated_eviction_invariants();
+    test_seq_add_invariant_validation();
+    test_decoupled_host_memory_accounting();
+    test_layer_paging_residency_reduction();
     std::cout << "[TEST] Starting Realistic End-to-End AMU-QUANT Pipeline Verification..." << std::endl;
 
     AMUQuantConfig cfg;

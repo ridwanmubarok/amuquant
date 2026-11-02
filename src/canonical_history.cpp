@@ -223,7 +223,92 @@ uint64_t CanonicalHistoryStore::append_turn(const std::string& role, const std::
         facts_.push_back(std::move(slot));
     }
 
+    compact_turns_locked();
+
     return id;
+}
+
+void CanonicalHistoryStore::compact_turns_locked() {
+    if (turns_.size() <= max_retained_turns_ || max_retained_turns_ == 0) {
+        return;
+    }
+
+    size_t excess = turns_.size() - max_retained_turns_;
+    size_t removed = 0;
+    auto it = turns_.begin();
+    while (it != turns_.end() && removed < excess) {
+        uint64_t tid = it->turn_id;
+        bool has_active_fact = false;
+        for (const auto& f : facts_) {
+            if (f.turn_id == tid && f.status == FactStatus::ACTIVE) {
+                has_active_fact = true;
+                break;
+            }
+        }
+        if (!has_active_fact) {
+            it = turns_.erase(it);
+            removed++;
+        } else {
+            ++it;
+        }
+    }
+}
+
+QueryIntent CanonicalHistoryStore::classify_query_intent(const std::string& query_text) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return classify_query_intent_locked(query_text);
+}
+
+QueryIntent CanonicalHistoryStore::classify_query_intent_locked(const std::string& query_text) const {
+    std::string lower = to_lower_str(query_text);
+
+    // 1. Explicit recall and temporal reference markers
+    static const std::vector<std::string> RECALL_MARKERS = {
+        "tadi", "sebelumnya", "kemarin", "yang tadi", "ingat", "pernahkah",
+        "disebutkan", "catatan", "riwayat", "apakah tadi", "apa tadi",
+        "what was", "who was", "where was", "earlier", "previously", "did i mention",
+        "do you remember", "you mentioned", "i mentioned", "in our chat", "in this chat"
+    };
+    for (const auto& marker : RECALL_MARKERS) {
+        if (lower.find(marker) != std::string::npos) {
+            return QueryIntent::HISTORICAL_FACT_RECALL;
+        }
+    }
+
+    // 2. Explicit entity inquiry markers
+    static const std::vector<std::string> ENTITY_INQUIRY_MARKERS = {
+        "proyek", "project", "port", "server", "host", "versi", "version",
+        "kode rahasia", "secret code", "lisensi", "token", "password", "pin",
+        "database", "ip address", "pemilik", "owner"
+    };
+    static const std::vector<std::string> QUESTION_WORDS = {
+        "siapa", "berapa", "kapan", "dimana", "mana", "apa", "apakah",
+        "what", "who", "where", "which", "how many", "?"
+    };
+
+    bool has_question_marker = false;
+    for (const auto& qw : QUESTION_WORDS) {
+        if (lower.find(qw) != std::string::npos) {
+            has_question_marker = true;
+            break;
+        }
+    }
+
+    if (has_question_marker) {
+        for (const auto& f : facts_) {
+            std::string lower_k = to_lower_str(f.entity_key);
+            if (!lower_k.empty() && lower.find(lower_k) != std::string::npos) {
+                return QueryIntent::HISTORICAL_FACT_RECALL;
+            }
+        }
+        for (const auto& em : ENTITY_INQUIRY_MARKERS) {
+            if (lower.find(em) != std::string::npos) {
+                return QueryIntent::HISTORICAL_FACT_RECALL;
+            }
+        }
+    }
+
+    return QueryIntent::GENERAL_TASK_OR_CHAT;
 }
 
 void CanonicalHistoryStore::mark_evicted_range(int32_t evict_start, int32_t evict_end) {
@@ -486,7 +571,7 @@ std::string CanonicalHistoryStore::format_grounded_memory_prompt(
         }
 
         float overlap_ratio = static_cast<float>(overlap) / static_cast<float>(k_words.size());
-        bool key_matched = (k_words.size() == 1) ? (overlap == 1) : (overlap_ratio >= 0.60f);
+        bool key_matched = (k_words.size() == 1) ? (overlap == 1) : (overlap_ratio >= 0.50f);
 
         bool val_matched = false;
         std::string lower_v = to_lower_str(f.entity_value);
@@ -523,7 +608,27 @@ std::string CanonicalHistoryStore::format_grounded_memory_prompt(
 
     if (out_max_score) *out_max_score = max_score;
 
-    bool abstain = (max_score < evidence_threshold || (query_words.size() > 0 && matched_facts.empty() && max_score < 0.40f));
+    (void)evidence_threshold;
+    QueryIntent intent = classify_query_intent_locked(query_text);
+    bool has_matched_facts = !matched_facts.empty();
+    bool abstain = false;
+
+    if (!has_matched_facts) {
+        if (intent == QueryIntent::HISTORICAL_FACT_RECALL) {
+            // User explicitly inquired about historical factual context, but no matching evidence was found
+            abstain = true;
+        } else {
+            // General conversation, coding prompt, or non-recall instruction: do NOT abstain, return empty context
+            if (out_max_score) *out_max_score = max_score;
+            if (out_abstain_recommended) *out_abstain_recommended = false;
+            return "";
+        }
+    } else {
+        // Matched facts were found! Do not abstain.
+        abstain = false;
+    }
+
+    if (out_max_score) *out_max_score = max_score;
     if (out_abstain_recommended) *out_abstain_recommended = abstain;
 
     std::ostringstream oss;

@@ -16,13 +16,41 @@ AMUQuantController::AMUQuantController(
     kv_surgeon_(std::move(kv_surgeon)),
     current_regime_(Regime::REGIME_1_HIGH_THROUGHPUT),
     prefetch_depth_(3),
-    aggressive_evict_(false) {}
+    aggressive_evict_(false) {
+    if (config_.memory_limit_bytes == 0 || config_.os_reserved_bytes == 0) {
+        uint64_t detected_ram = telemetry_ ? telemetry_->sample().total_ram_bytes : 0;
+        if (detected_ram == 0) detected_ram = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+        if (config_.memory_limit_bytes == 0) {
+            if (detected_ram <= 9ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.memory_limit_bytes = 6000ULL * 1024ULL * 1024ULL;
+            } else if (detected_ram <= 18ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.memory_limit_bytes = 12ULL * 1024ULL * 1024ULL * 1024ULL;
+            } else {
+                config_.memory_limit_bytes = static_cast<uint64_t>(detected_ram * 0.80);
+            }
+        }
+        if (config_.os_reserved_bytes == 0) {
+            if (detected_ram <= 9ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.os_reserved_bytes = 350ULL * 1024ULL * 1024ULL;
+            } else if (detected_ram <= 18ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.os_reserved_bytes = 700ULL * 1024ULL * 1024ULL;
+            } else {
+                config_.os_reserved_bytes = static_cast<uint64_t>(detected_ram * 0.08);
+            }
+        }
+    }
+}
 
 double AMUQuantController::compute_phi_score(
     const MemoryStats& current_stats,
     double elapsed_sec,
     double delta_rss_bytes
 ) const {
+    if (!current_stats.telemetry_valid) {
+        // Guard against telemetry failure: preserve last known pressure rather than assuming zero memory usage
+        return last_phi_;
+    }
+
     uint64_t safe_limit = (config_.memory_limit_bytes > config_.os_reserved_bytes) ? 
                           (config_.memory_limit_bytes - config_.os_reserved_bytes) : config_.memory_limit_bytes;
     if (safe_limit == 0) return 0.0;
@@ -248,18 +276,29 @@ StepDecision AMUQuantController::on_token_step(
     MemoryStats current_stats = telemetry_ ? telemetry_->sample() : MemoryStats{};
     double current_time = current_stats.timestamp_sec;
 
+    if (!current_stats.telemetry_valid) {
+        decision.telemetry_error = true;
+    }
+
     double elapsed_sec = 0.1;
     double delta_rss = 0.0;
 
     if (!first_eval_) {
         elapsed_sec = current_time - last_eval_time_;
-        delta_rss = static_cast<double>(current_stats.process_rss_bytes) - static_cast<double>(last_eval_rss_);
+        if (current_stats.telemetry_valid && last_eval_rss_ > 0) {
+            delta_rss = static_cast<double>(current_stats.process_rss_bytes) - static_cast<double>(last_eval_rss_);
+        } else {
+            // Guard: Do NOT interpret telemetry failure as negative delta / memory savings!
+            delta_rss = 0.0;
+        }
     } else {
         first_eval_ = false;
     }
 
-    last_eval_time_ = current_time;
-    last_eval_rss_ = current_stats.process_rss_bytes;
+    if (current_stats.telemetry_valid) {
+        last_eval_time_ = current_time;
+        last_eval_rss_ = current_stats.process_rss_bytes;
+    }
 
     double phi = compute_phi_score(current_stats, elapsed_sec, delta_rss);
     last_phi_ = phi;
@@ -366,10 +405,13 @@ void AMUQuantController::apply_regime_transition(
                     last_estimated_savings_bytes_ = static_cast<uint64_t>(
                         static_cast<double>(count * bytes_per_token) * adaptive_calib_factor_
                     );
+                    uint64_t rss_before = telemetry_ ? telemetry_->sample().process_rss_bytes : 0;
                     bool ok = kv_surgeon_->execute_eviction(range, seq_rm, seq_add);
+                    uint64_t rss_after = telemetry_ ? telemetry_->sample().process_rss_bytes : 0;
+                    int64_t rss_delta = (rss_before > 0 && rss_after > 0) ? (static_cast<int64_t>(rss_after) - static_cast<int64_t>(rss_before)) : 0;
                     decision.kv_pruned = ok;
                     if (ok) {
-                        record_actual_reclaimed(count * bytes_per_token);
+                        record_actual_reclaimed(count * bytes_per_token, rss_delta);
                     }
                 }
             }
@@ -395,10 +437,13 @@ void AMUQuantController::apply_regime_transition(
                     last_estimated_savings_bytes_ = static_cast<uint64_t>(
                         static_cast<double>(count * bytes_per_token) * adaptive_calib_factor_
                     );
+                    uint64_t rss_before = telemetry_ ? telemetry_->sample().process_rss_bytes : 0;
                     bool ok = kv_surgeon_->execute_eviction(range, seq_rm, seq_add);
+                    uint64_t rss_after = telemetry_ ? telemetry_->sample().process_rss_bytes : 0;
+                    int64_t rss_delta = (rss_before > 0 && rss_after > 0) ? (static_cast<int64_t>(rss_after) - static_cast<int64_t>(rss_before)) : 0;
                     decision.kv_pruned = ok;
                     if (ok) {
-                        record_actual_reclaimed(count * bytes_per_token);
+                        record_actual_reclaimed(count * bytes_per_token, rss_delta);
                     }
                 }
             }
@@ -408,16 +453,24 @@ void AMUQuantController::apply_regime_transition(
 
     decision.estimated_savings_bytes = last_estimated_savings_bytes_;
     decision.actual_reclaimed_bytes = last_actual_reclaimed_bytes_;
+    decision.logical_reclaimed_bytes = last_logical_reclaimed_bytes_;
+    decision.physical_rss_delta_bytes = last_physical_rss_delta_bytes_;
     decision.estimation_delta_bytes = last_estimation_delta_bytes_;
     decision.calibration_factor = adaptive_calib_factor_;
 }
 
 void AMUQuantController::record_actual_reclaimed(uint64_t actual_reclaimed_bytes) {
-    last_actual_reclaimed_bytes_ = actual_reclaimed_bytes;
-    last_estimation_delta_bytes_ = static_cast<int64_t>(last_estimated_savings_bytes_) - static_cast<int64_t>(actual_reclaimed_bytes);
+    record_actual_reclaimed(actual_reclaimed_bytes, 0);
+}
+
+void AMUQuantController::record_actual_reclaimed(uint64_t logical_reclaimed_bytes, int64_t physical_rss_delta_bytes) {
+    last_actual_reclaimed_bytes_ = logical_reclaimed_bytes;
+    last_logical_reclaimed_bytes_ = logical_reclaimed_bytes;
+    last_physical_rss_delta_bytes_ = physical_rss_delta_bytes;
+    last_estimation_delta_bytes_ = static_cast<int64_t>(last_estimated_savings_bytes_) - static_cast<int64_t>(logical_reclaimed_bytes);
 
     if (last_estimated_savings_bytes_ > 0) {
-        double ratio = static_cast<double>(actual_reclaimed_bytes) / static_cast<double>(last_estimated_savings_bytes_);
+        double ratio = static_cast<double>(logical_reclaimed_bytes) / static_cast<double>(last_estimated_savings_bytes_);
         adaptive_calib_factor_ = (0.85 * adaptive_calib_factor_) + (0.15 * ratio);
         adaptive_calib_factor_ = std::max(0.5, std::min(2.0, adaptive_calib_factor_));
     }
@@ -434,6 +487,8 @@ void AMUQuantController::reset() {
     adaptive_calib_factor_ = 1.0;
     last_estimated_savings_bytes_ = 0;
     last_actual_reclaimed_bytes_ = 0;
+    last_logical_reclaimed_bytes_ = 0;
+    last_physical_rss_delta_bytes_ = 0;
     last_estimation_delta_bytes_ = 0;
 }
 

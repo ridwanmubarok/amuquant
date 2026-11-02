@@ -71,17 +71,19 @@ public:
     uint32_t get_prefetch_depth() const { return prefetch_depth_; }
     bool is_aggressive_evict() const { return aggressive_evict_; }
     double get_last_phi() const { return last_phi_; }
-    uint8_t get_current_bit_width() const { return 4; }
 
     /**
      * @brief Records actual measured physical memory reclamation post-eviction.
      * Updates adaptive calibration factor to minimize estimation bias.
      */
     void record_actual_reclaimed(uint64_t actual_reclaimed_bytes);
+    void record_actual_reclaimed(uint64_t logical_reclaimed_bytes, int64_t physical_rss_delta_bytes);
 
     double get_adaptive_calibration_factor() const { return adaptive_calib_factor_; }
     uint64_t get_last_estimated_savings() const { return last_estimated_savings_bytes_; }
     uint64_t get_last_actual_reclaimed() const { return last_actual_reclaimed_bytes_; }
+    uint64_t get_last_logical_reclaimed() const { return last_logical_reclaimed_bytes_; }
+    int64_t get_last_physical_rss_delta() const { return last_physical_rss_delta_bytes_; }
     int64_t get_last_estimation_delta() const { return last_estimation_delta_bytes_; }
 
     void update_attention_sink(uint32_t sink_tokens) {
@@ -112,6 +114,8 @@ private:
     double adaptive_calib_factor_{1.0};
     uint64_t last_estimated_savings_bytes_{0};
     uint64_t last_actual_reclaimed_bytes_{0};
+    uint64_t last_logical_reclaimed_bytes_{0};
+    int64_t last_physical_rss_delta_bytes_{0};
     int64_t last_estimation_delta_bytes_{0};
 
     double last_eval_time_{0.0};

@@ -123,18 +123,32 @@ void print_banner(const GGUFModelInfo& info, const MemoryStats& mem, int gpu_lay
 void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gpu_layers, int pcores) {
     EngineMetrics m = engine.get_metrics();
     MemoryStats s = const_cast<AMUQuantEngine&>(engine).get_telemetry()->sample();
+    ReliableMemoryMetrics rm = engine.get_reliable_memory_metrics();
+    auto kv_stats = const_cast<AMUQuantEngine&>(engine).get_kv_surgeon() ? const_cast<AMUQuantEngine&>(engine).get_kv_surgeon()->get_stats(info.block_count, 8, 128) : KVSurgeryStats{};
 
     std::cout << ANSI_GRAY << "--------------------------------------------------------------------------------\n";
     std::cout << ANSI_BOLD << "  AMU-QUANT TELEMETRY & SYSTEM STATS REPORT\n" << ANSI_RESET;
     std::cout << "  - Active Regime: " << ANSI_YELLOW << regime_to_string(m.final_regime) << ANSI_RESET << "\n";
     std::cout << "  - Hardware Acceleration: Metal GPU (" << gpu_layers << "/" << info.block_count << " layers) + CPU (" << pcores << " P-Cores)\n";
+    std::cout << "  - Telemetry Pipeline Status: " << (s.telemetry_valid ? std::string(ANSI_GREEN) + "VALID (Kernel OK)" : std::string(ANSI_YELLOW) + "DEGRADED") << ANSI_RESET << "\n";
+    std::cout << ANSI_BOLD << "  Host-Aware Memory Accounting Breakdown:\n" << ANSI_RESET;
     std::cout << "  - Process Resident Memory (RSS): " << (s.process_rss_bytes / (1024 * 1024)) << " MB\n";
+    std::cout << "  - Physical Memory Footprint: " << (s.physical_footprint_bytes / (1024 * 1024)) << " MB\n";
     std::cout << "  - Available Physical RAM: " << (s.available_ram_bytes / (1024 * 1024)) << " MB\n";
+    std::cout << "  - Host Swap Consumed: " << (s.swap_used_bytes / (1024 * 1024)) << " MB\n";
+    std::cout << "  - Model Weights Resident (via mincore): " << (s.model_resident_bytes / (1024 * 1024)) << " MB / "
+              << (const_cast<AMUQuantEngine&>(engine).get_layer_manager()->get_total_registered_bytes() / (1024 * 1024)) << " MB\n";
+    std::cout << "  - Active KV-Cache Logical Size: " << (s.kv_logical_bytes / 1024) << " KB\n";
     std::cout << "  - Major Page Faults (ru_majflt): " << s.major_page_faults << "\n";
     std::cout << "  - Total Tokens Generated: " << m.total_tokens_generated << "\n";
     std::cout << "  - Total KV Evictions: " << m.total_kv_evictions << "\n";
+    std::cout << "  - Failed KV Surgeries: " << kv_stats.failed_surgery_count << "\n";
     std::cout << "  - Average Inter-Token Latency: " << std::fixed << std::setprecision(2) << m.avg_inter_token_latency_ms << " ms/token\n";
-    std::cout << "  - Model Weights Mmapped: " << info.block_count << " layers (" << info.tensor_count << " tensors)\n";
+    std::cout << ANSI_BOLD << "  Canonical History & Grounding Telemetry:\n" << ANSI_RESET;
+    std::cout << "  - Active Facts / Total Registered: " << rm.active_facts_count << "/" << rm.total_facts_registered << "\n";
+    std::cout << "  - Superseded Facts / Conflicts: " << rm.superseded_facts_count << "/" << rm.conflict_resolutions_triggered << "\n";
+    std::cout << "  - Abstentions Recommended: " << rm.abstentions_recommended << "\n";
+    std::cout << "  - Grounding Checks Passed: " << rm.grounding_verifications_passed << " | Failed: " << rm.grounding_verifications_failed << "\n";
     std::cout << ANSI_GRAY << "--------------------------------------------------------------------------------\n" << ANSI_RESET;
 }
 
@@ -142,11 +156,22 @@ void print_stats(const AMUQuantEngine& engine, const GGUFModelInfo& info, int gp
 
 int main(int argc, char** argv) {
     std::string model_path = "models/qwen2.5-3b-instruct-q4_k_m.gguf";
+    std::string csv_export_path = "";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg.rfind("--", 0) != 0) {
+        if (arg == "--export-csv" && i + 1 < argc) {
+            csv_export_path = argv[++i];
+        } else if (arg.rfind("--", 0) != 0) {
             model_path = arg;
+        }
+    }
+
+    std::ofstream csv_file;
+    if (!csv_export_path.empty()) {
+        csv_file.open(csv_export_path);
+        if (csv_file.is_open()) {
+            csv_file << "timestamp_ms,step,process_rss_mb,physical_footprint_mb,available_ram_mb,swap_used_mb,context_length,kv_logical_kb,model_resident_mb,regime,phi_score,inter_token_latency_ms,grounding_status\n";
         }
     }
 
@@ -204,6 +229,37 @@ int main(int argc, char** argv) {
     if (engine.initialize() != Status::OK) {
         std::cerr << "Failed to initialize AMUQuantEngine.\n";
         return 1;
+    }
+
+    // 2b. Map model file to manage layer paging via LayerManager
+    int model_fd = open(model_path.c_str(), O_RDONLY);
+    void* mmap_base = MAP_FAILED;
+    size_t model_file_size = 0;
+    if (model_fd >= 0) {
+        try {
+            model_file_size = std::filesystem::file_size(model_path);
+            mmap_base = mmap(nullptr, model_file_size, PROT_READ, MAP_SHARED, model_fd, 0);
+            if (mmap_base != MAP_FAILED) {
+                for (uint32_t l = 0; l < model_info.block_count; ++l) {
+                    auto it = model_info.layer_tensors.find(l);
+                    if (it != model_info.layer_tensors.end() && !it->second.empty()) {
+                        uint64_t min_off = UINT64_MAX;
+                        uint64_t max_off = 0;
+                        for (size_t tidx : it->second) {
+                            uint64_t off = model_info.tensors[tidx].offset;
+                            uint64_t sz = model_info.tensors[tidx].size_bytes;
+                            if (off < min_off) min_off = off;
+                            if (off + sz > max_off) max_off = off + sz;
+                        }
+                        if (min_off < max_off && (model_info.tensor_data_offset + max_off) <= model_file_size) {
+                            void* layer_addr = static_cast<char*>(mmap_base) + model_info.tensor_data_offset + min_off;
+                            size_t layer_len = static_cast<size_t>(max_off - min_off);
+                            engine.register_layer(l, layer_addr, layer_len);
+                        }
+                    }
+                }
+            }
+        } catch (...) {}
     }
 
     // 3. Initialize libllama backend with auto-calibrated hybrid acceleration
@@ -264,7 +320,33 @@ int main(int argc, char** argv) {
     };
 
     auto seq_add = [&](int32_t p0, int32_t p1, int32_t delta) -> bool {
+        llama_pos pos_max_before = llama_memory_seq_pos_max(mem, 0);
+        llama_pos pos_min_before = llama_memory_seq_pos_min(mem, 0);
+
+        // Sequence invariant: cannot shift empty sequence or invalid position
+        if (pos_max_before < 0 || p0 > pos_max_before) {
+            return false;
+        }
+
         llama_memory_seq_add(mem, 0, p0, p1, delta);
+
+        llama_pos pos_max_after = llama_memory_seq_pos_max(mem, 0);
+        llama_pos pos_min_after = llama_memory_seq_pos_min(mem, 0);
+
+        // Invariant 1: Attention sink tokens at position 0 must be preserved
+        if (pos_min_before == 0 && pos_min_after != 0) {
+            return false;
+        }
+
+        // Invariant 2: When shifting through the sequence tail (p1 == -1),
+        // the new maximum position must exactly match (pos_max_before + delta)
+        if (p1 == -1) {
+            llama_pos expected_max = pos_max_before + delta;
+            if (pos_max_after != expected_max) {
+                return false;
+            }
+        }
+
         return true;
     };
 
@@ -344,12 +426,27 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // 5. Format prompt according to model architecture (Llama-3 or Qwen ChatML)
+        // 5. Query Canonical History for grounded facts & calibrated abstention
+        float rel_score = 0.0f;
+        bool abstain_rec = false;
+        std::string memory_block = engine.construct_grounded_prompt(user_input, &rel_score, &abstain_rec);
+
+        std::string user_content_with_memory;
+        if (!memory_block.empty()) {
+            std::cout << ANSI_CYAN << "  [AMU-QUANT Memory Recall: Grounded history block injected (Score: " 
+                      << std::fixed << std::setprecision(2) << rel_score 
+                      << (abstain_rec ? " | Guard: ABSTAIN DIRECTIVE" : " | Guard: GROUNDED") << ")]\n" << ANSI_RESET;
+            user_content_with_memory = memory_block + "\n" + user_input;
+        } else {
+            user_content_with_memory = user_input;
+        }
+
+        // Format prompt according to model architecture (Llama-3 or Qwen ChatML)
         std::string user_prompt;
         if (is_llama) {
-            user_prompt = "<|start_header_id|>user<|end_header_id|>\n\n" + user_input + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+            user_prompt = "<|start_header_id|>user<|end_header_id|>\n\n" + user_content_with_memory + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
         } else {
-            user_prompt = "<|im_start|>user\n" + user_input + "<|im_end|>\n<|im_start|>assistant\n";
+            user_prompt = "<|im_start|>user\n" + user_content_with_memory + "<|im_end|>\n<|im_start|>assistant\n";
         }
         std::vector<llama_token> prompt_tokens(user_prompt.size() + 16);
         int n_tokens = llama_tokenize(vocab, user_prompt.c_str(), user_prompt.size(), prompt_tokens.data(), prompt_tokens.size(), false, true);
@@ -372,6 +469,12 @@ int main(int argc, char** argv) {
             batch.seq_id[batch.n_tokens][0] = 0;
             batch.logits[batch.n_tokens] = true;
             batch.n_tokens++;
+        }
+
+        // Trigger layer forward paging hooks for prompt evaluation
+        for (uint32_t l = 0; l < model_info.block_count; ++l) {
+            engine.begin_layer_forward(l);
+            engine.end_layer_forward(l);
         }
 
         if (llama_decode(ctx, batch) != 0) {
@@ -444,6 +547,12 @@ int main(int argc, char** argv) {
             batch.seq_id[0][0] = 0;
             batch.logits[batch.n_tokens] = true;
 
+            // Trigger layer forward paging hooks for autoregressive decoding
+            for (uint32_t l = 0; l < model_info.block_count; ++l) {
+                engine.begin_layer_forward(l);
+                engine.end_layer_forward(l);
+            }
+
             if (llama_decode(ctx, batch) != 0) {
                 break;
             }
@@ -456,11 +565,23 @@ int main(int argc, char** argv) {
         // Record assistant response into canonical history
         engine.record_turn("assistant", assistant_response, prompt_tok_end, n_past);
 
+        // Verify grounding of assistant output against memory context
+        bool grounding_passed = true;
+        std::string grounding_label = "N/A";
+        if (!memory_block.empty()) {
+            grounding_passed = engine.verify_response_grounding(assistant_response, memory_block);
+            if (abstain_rec) {
+                grounding_label = grounding_passed ? "ABSTAINED (PASS)" : "VIOLATION";
+            } else {
+                grounding_label = grounding_passed ? "GROUNDED (PASS)" : "UNGROUNDED";
+            }
+        }
+
         auto t_end = std::chrono::steady_clock::now();
         double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         double tok_per_sec = (generated_tokens > 0 && elapsed_ms > 0) ? (generated_tokens / (elapsed_ms / 1000.0)) : 0.0;
 
-        // Status HUD bar dengan rincian akselerasi hardware
+        // Status HUD bar dengan rincian akselerasi hardware dan telemetri memori terpisah
         MemoryStats cur_mem = engine.get_telemetry()->sample();
         Regime cur_reg = engine.get_controller()->get_current_regime();
 
@@ -468,14 +589,47 @@ int main(int argc, char** argv) {
                   << regime_to_string(cur_reg) << " | "
                   << "Metal: " << gpu_layers << "/" << model_info.block_count << "L | "
                   << "P-Cores: " << pcore_threads << "T | "
-                  << "FlashAttn: ON | "
                   << "RSS: " << (cur_mem.process_rss_bytes / (1024 * 1024)) << " MB | "
+                  << "Phys: " << (cur_mem.physical_footprint_bytes / (1024 * 1024)) << " MB | "
+                  << "MdlRes: " << (cur_mem.model_resident_bytes / (1024 * 1024)) << " MB | "
+                  << "KV: " << (cur_mem.kv_logical_bytes / 1024) << " KB | "
+                  << "Grounding: " << grounding_label << " | "
                   << "Throughput: " << std::fixed << std::setprecision(1) << tok_per_sec << " tok/s | "
                   << "Context: " << n_past << " tokens]"
                   << ANSI_RESET << "\n\n";
+
+        if (csv_file.is_open()) {
+            uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            csv_file << now_ms << ","
+                     << generated_tokens << ","
+                     << (cur_mem.process_rss_bytes / (1024 * 1024)) << ","
+                     << (cur_mem.physical_footprint_bytes / (1024 * 1024)) << ","
+                     << (cur_mem.available_ram_bytes / (1024 * 1024)) << ","
+                     << (cur_mem.swap_used_bytes / (1024 * 1024)) << ","
+                     << n_past << ","
+                     << (cur_mem.kv_logical_bytes / 1024) << ","
+                     << (cur_mem.model_resident_bytes / (1024 * 1024)) << ","
+                     << static_cast<int>(cur_reg) << ","
+                     << std::fixed << std::setprecision(3) << engine.get_controller()->get_last_phi() << ","
+                     << (generated_tokens > 0 ? (elapsed_ms / generated_tokens) : 0.0) << ","
+                     << grounding_label << "\n" << std::flush;
+        }
     }
 
-    // Bersihkan sumber daya
+    if (csv_file.is_open()) {
+        csv_file.close();
+        std::cout << ANSI_GREEN << "[INFO] Telemetry dataset successfully exported to: " << csv_export_path << ANSI_RESET << std::endl;
+    }
+
+    // Bersihkan sumber daya model mmap dan libllama
+    if (mmap_base != MAP_FAILED) {
+        munmap(mmap_base, model_file_size);
+    }
+    if (model_fd >= 0) {
+        close(model_fd);
+    }
+
     llama_batch_free(batch);
     llama_sampler_free(smpl);
     llama_free(ctx);

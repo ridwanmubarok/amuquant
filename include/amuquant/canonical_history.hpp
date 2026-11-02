@@ -14,6 +14,11 @@ enum class FactStatus {
     CONTRADICTED
 };
 
+enum class QueryIntent {
+    GENERAL_TASK_OR_CHAT,
+    HISTORICAL_FACT_RECALL
+};
+
 struct FactSlot {
     uint64_t slot_id{0};
     uint64_t turn_id{0};
@@ -71,6 +76,9 @@ public:
     // Lexical entity and keyword matching across turns
     std::vector<std::pair<uint64_t, float>> search_lexical(const std::string& query_text, bool evicted_only = false) const;
 
+    // Classifies query intent: distinguishes general chat/task from historical memory inquiry
+    QueryIntent classify_query_intent(const std::string& query_text) const;
+
     // Formats retrieved historical memories into a structured system prompt block with provenance tags
     std::string format_system_memory_context(const std::vector<RetrievedMemory>& memories, size_t max_chars = 1500) const;
 
@@ -83,16 +91,23 @@ public:
         size_t max_chars = 1500
     ) const;
 
+    void set_max_retained_turns(size_t max_turns) { max_retained_turns_ = max_turns; }
+    size_t get_max_retained_turns() const { return max_retained_turns_; }
+
     void clear();
     size_t size() const;
 
 private:
+    void compact_turns_locked();
+    QueryIntent classify_query_intent_locked(const std::string& query_text) const;
+
     mutable std::mutex mutex_;
     std::vector<HistoryTurn> turns_;
     std::vector<FactSlot> facts_;
     uint64_t next_turn_id_{0};
     uint64_t next_slot_id_{0};
     uint32_t conflict_count_{0};
+    size_t max_retained_turns_{64};
 };
 
 } // namespace amuquant

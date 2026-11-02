@@ -146,11 +146,121 @@ void test_calibrated_abstention() {
     std::cout << "  Passed: Calibrated abstention guardrail accurately triggered and verified." << std::endl;
 }
 
+void test_prompt_injection_after_eviction() {
+    std::cout << "[TEST 4] Verifying Fact Retention and Prompt Grounding Post-Eviction..." << std::endl;
+    AMUQuantConfig cfg;
+    cfg.evidence_threshold = 0.25f;
+    cfg.enable_abstention_guardrail = true;
+
+    AMUQuantEngine engine(cfg);
+    Status st = engine.initialize();
+    assert(st == Status::OK);
+
+    // Turn 0: User introduces factual parameters
+    uint64_t t0 = engine.record_turn("user", "Host server: 192.168.1.150. Port: 9000. Service: Aegis-Gateway.", 0, 20);
+    assert(t0 == 0);
+
+    // Turn 1: Assistant acknowledges
+    engine.record_turn("assistant", "Konfigurasi server 192.168.1.150 pada port 9000 telah aktif.", 21, 35);
+
+    // Verify facts were extracted into FactRegister
+    auto facts_before = engine.get_history_store()->get_facts(true);
+    assert(facts_before.size() >= 3);
+
+    // Simulate physical KV eviction of Turn 0 & Turn 1 tokens [0, 36)
+    engine.get_history_store()->mark_evicted_range(0, 36);
+
+    // Verify that the turns are marked as evicted from active KV-cache
+    const auto& turns = engine.get_history_store()->get_turns();
+    assert(turns.size() == 2);
+    assert(turns[0].is_evicted_from_kv == true);
+    assert(turns[1].is_evicted_from_kv == true);
+
+    // Turn 2: User queries evicted factual information: "Berapa port dan host server?"
+    float rel = 0.0f;
+    bool abstain = false;
+    std::string prompt_block = engine.construct_grounded_prompt("Berapa port dan host server?", &rel, &abstain);
+
+    // Fact must be recalled from canonical history despite physical KV-cache eviction!
+    assert(!abstain);
+    assert(rel >= cfg.evidence_threshold);
+    assert(prompt_block.find("192.168.1.150") != std::string::npos);
+    assert(prompt_block.find("9000") != std::string::npos);
+    assert(prompt_block.find("[RELIABLE CONVERSATIONAL MEMORY") != std::string::npos);
+
+    // Verify grounding check for assistant answer
+    std::string accurate_answer = "Port server adalah 9000 dan host server adalah 192.168.1.150.";
+    assert(engine.verify_response_grounding(accurate_answer, prompt_block) == true);
+
+    std::cout << "  Passed: Evicted factual context successfully recalled and reconstructed." << std::endl;
+}
+
+void test_intent_aware_abstention_guardrail() {
+    std::cout << "[TEST 5] Verifying Intent-Aware Calibrated Abstention (No Over-Refusal)..." << std::endl;
+    AMUQuantConfig cfg;
+    cfg.enable_abstention_guardrail = true;
+
+    AMUQuantEngine engine(cfg);
+    engine.initialize();
+
+    // 1. General conversation greeting: must NOT trigger abstention guard
+    float rel1 = 0.0f;
+    bool abstain1 = true;
+    std::string prompt1 = engine.construct_grounded_prompt("Halo, selamat pagi! Bagaimana kabarmu?", &rel1, &abstain1);
+    assert(!abstain1);
+    assert(prompt1.empty());
+
+    // 2. General programming request: must NOT trigger abstention guard
+    float rel2 = 0.0f;
+    bool abstain2 = true;
+    std::string prompt2 = engine.construct_grounded_prompt("Tolong buatkan fungsi binary search di C++.", &rel2, &abstain2);
+    assert(!abstain2);
+    assert(prompt2.empty());
+
+    // 3. Inquiry regarding past factual parameter not in memory: MUST trigger abstention guard
+    float rel3 = 0.0f;
+    bool abstain3 = false;
+    std::string prompt3 = engine.construct_grounded_prompt("Berapa kode rahasia vault yang tadi disebutkan?", &rel3, &abstain3);
+    assert(abstain3);
+    assert(!prompt3.empty());
+    assert(prompt3.find("[RELIABLE MEMORY GUARD: INSUFFICIENT EVIDENCE]") != std::string::npos);
+
+    std::cout << "  Passed: Intent-aware abstention distinguishes chat from factual inquiries." << std::endl;
+}
+
+void test_rolling_window_compaction() {
+    std::cout << "[TEST 6] Verifying Rolling Window Canonical History Compaction (O(1) Bound)..." << std::endl;
+    CanonicalHistoryStore store;
+    store.set_max_retained_turns(10);
+
+    // Turn 0 has an active fact
+    store.append_turn("user", "Host server: 10.0.0.1.", 0, 5);
+
+    // Add 20 filler turns without facts
+    for (int i = 1; i <= 20; ++i) {
+        store.append_turn("user", "Percakapan biasa filler nomor " + std::to_string(i), i * 10, i * 10 + 5);
+    }
+
+    // Size must be bounded around max_retained_turns_ (10)
+    assert(store.size() <= 11);
+
+    // Turn 0 with active fact must be preserved despite being oldest!
+    auto facts = store.get_facts(true);
+    assert(!facts.empty());
+    assert(facts[0].entity_key == "Host server");
+    assert(facts[0].entity_value == "10.0.0.1");
+
+    std::cout << "  Passed: Rolling window bounded turns without losing active factual slots." << std::endl;
+}
+
 int main() {
     std::cout << "=== AMU-QUANT RELIABLE MEMORY UNIT TEST SUITE ===" << std::endl;
     test_provenance_tracking();
     test_temporal_conflict_resolution();
     test_calibrated_abstention();
+    test_prompt_injection_after_eviction();
+    test_intent_aware_abstention_guardrail();
+    test_rolling_window_compaction();
     std::cout << "ALL RELIABLE MEMORY TESTS PASSED SUCCESSFULLY!" << std::endl;
     return 0;
 }

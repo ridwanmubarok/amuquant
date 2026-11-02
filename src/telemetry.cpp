@@ -1,4 +1,6 @@
 #include "amuquant/telemetry.hpp"
+#include "amuquant/layer_manager.hpp"
+#include "amuquant/kv_surgeon.hpp"
 
 #include <chrono>
 #include <sys/resource.h>
@@ -47,23 +49,29 @@ MemoryStats SystemTelemetry::sample() {
 
     MemoryStats stats{};
     stats.timestamp_sec = now;
+    stats.telemetry_valid = true;
 
     // Process page fault metrics via getrusage
     struct rusage usage{};
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
         stats.major_page_faults = static_cast<uint64_t>(usage.ru_majflt);
+    } else {
+        stats.telemetry_valid = false;
     }
 
 #if defined(__APPLE__)
-    // Query physical footprint on Darwin via task_info (TASK_VM_INFO)
+    // Decouple pure RSS from physical footprint on Darwin via task_info (TASK_VM_INFO)
     task_vm_info_data_t vm_info{};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm_info), &count);
     if (kr == KERN_SUCCESS) {
-        stats.process_rss_bytes = static_cast<uint64_t>(vm_info.phys_footprint);
+        stats.process_rss_bytes = static_cast<uint64_t>(vm_info.resident_size);
+        stats.physical_footprint_bytes = static_cast<uint64_t>(vm_info.phys_footprint);
     } else {
         // Fallback to high-water mark ru_maxrss
         stats.process_rss_bytes = static_cast<uint64_t>(usage.ru_maxrss);
+        stats.physical_footprint_bytes = static_cast<uint64_t>(usage.ru_maxrss);
+        if (usage.ru_maxrss == 0) stats.telemetry_valid = false;
     }
 
     // Host physical RAM size
@@ -72,6 +80,8 @@ MemoryStats SystemTelemetry::sample() {
     size_t length = sizeof(total_ram);
     if (sysctl(mib, 2, &total_ram, &length, nullptr, 0) == 0) {
         stats.total_ram_bytes = total_ram;
+    } else {
+        stats.telemetry_valid = false;
     }
 
     // Available physical RAM (free + inactive + speculative pages)
@@ -86,6 +96,8 @@ MemoryStats SystemTelemetry::sample() {
         uint64_t inactive_bytes = static_cast<uint64_t>(host_vm_info.inactive_count) * page_size;
         uint64_t speculative_bytes = static_cast<uint64_t>(host_vm_info.speculative_count) * page_size;
         stats.available_ram_bytes = free_bytes + inactive_bytes + speculative_bytes;
+    } else {
+        stats.telemetry_valid = false;
     }
 
     // Host swap utilization
@@ -96,7 +108,7 @@ MemoryStats SystemTelemetry::sample() {
     }
 
 #elif defined(__linux__)
-    // Linux implementation via /proc/meminfo and /proc/self/statm
+    // Linux implementation via /proc/meminfo, /proc/self/statm, and /proc/self/status
     long page_size = sysconf(_SC_PAGESIZE);
 
     std::ifstream statm("/proc/self/statm");
@@ -105,6 +117,27 @@ MemoryStats SystemTelemetry::sample() {
         uint64_t resident_pages = 0;
         statm >> size_pages >> resident_pages;
         stats.process_rss_bytes = resident_pages * page_size;
+    } else {
+        stats.telemetry_valid = false;
+    }
+
+    // Read physical footprint from /proc/self/status (VmRSS / RssAnon)
+    std::ifstream status("/proc/self/status");
+    if (status.is_open()) {
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.rfind("VmRSS:", 0) == 0) {
+                std::istringstream iss(line.substr(6));
+                uint64_t val_kb = 0;
+                if (iss >> val_kb) {
+                    stats.physical_footprint_bytes = val_kb * 1024ULL;
+                }
+                break;
+            }
+        }
+    }
+    if (stats.physical_footprint_bytes == 0) {
+        stats.physical_footprint_bytes = stats.process_rss_bytes;
     }
 
     std::ifstream meminfo("/proc/meminfo");
@@ -131,8 +164,20 @@ MemoryStats SystemTelemetry::sample() {
         if (swap_total >= swap_free) {
             stats.swap_used_bytes = swap_total - swap_free;
         }
+    } else {
+        stats.telemetry_valid = false;
     }
 #endif
+
+    // Query physical page residency of model weights via mincore(2)
+    if (layer_mgr_) {
+        stats.model_resident_bytes = layer_mgr_->get_total_actual_resident_bytes();
+    }
+
+    // Query active logical KV-cache capacity
+    if (kv_surgeon_) {
+        stats.kv_logical_bytes = kv_surgeon_->get_stats(num_layers_, kv_heads_, head_dim_, bytes_per_elem_).kv_memory_bytes;
+    }
 
     cached_stats_ = stats;
     last_sample_time_ = now;

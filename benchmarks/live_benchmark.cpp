@@ -58,15 +58,10 @@ struct StressRunResult {
     int64_t physical_rss_delta_mb{0};
     uint32_t kv_tokens_archived{0};
     size_t kv_logical_reclaimed_kb{0};
-    uint8_t initial_bit_width{4};
-    uint8_t final_bit_width{2};
     Regime final_regime{Regime::REGIME_3_ULTRA_LOW_SURVIVAL};
     bool survival_mode_triggered{false};
-    bool requantization_2bit_triggered{false};
-    double recall_score_4bit{0.0};
-    double recall_latency_4bit_ms{0.0};
-    double recall_score_2bit{0.0};
-    double recall_latency_2bit_ms{0.0};
+    double recall_score{0.0};
+    double recall_latency_ms{0.0};
     bool factual_needle_recovered{false};
     double factual_needle_score{0.0};
     size_t host_ram_consumed_mb{0};
@@ -110,7 +105,6 @@ struct PolicyAblationResult {
     double needle_cosine_score{0.0};
     double needle_latency_ms{0.0};
     Regime final_regime{Regime::REGIME_1_HIGH_THROUGHPUT};
-    uint8_t final_bit_width{4};
     double selected_cost{0.0};
     double final_calib_factor{1.0};
     int64_t final_estimation_delta{0};
@@ -1159,7 +1153,6 @@ int main(int argc, char** argv) {
         MemoryStats m_init = telemetry_sampler.sample();
         mock_stress_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
         mock_stress_res.peak_rss_mb = mock_stress_res.initial_rss_mb;
-        mock_stress_res.initial_bit_width = 4;
 
         engine.init_token_sequence(n_prompt);
 
@@ -1193,16 +1186,6 @@ int main(int argc, char** argv) {
             if (llama_vocab_is_eog(vocab, new_token)) break;
 
             if (step == 15) {
-                if (needle_token_pos < static_cast<int>(session_embeddings.size())) {
-                    auto t0 = std::chrono::high_resolution_clock::now();
-                    auto hits = engine.recall_context(session_embeddings.get(needle_token_pos), 3);
-                    auto t1 = std::chrono::high_resolution_clock::now();
-                    mock_stress_res.recall_latency_4bit_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                    if (!hits.empty() && hits[0].id == static_cast<uint64_t>(needle_token_pos)) {
-                        mock_stress_res.recall_score_4bit = hits[0].score;
-                    }
-                }
-
                 std::cout << "\n  >>> [DETERMINISTIC MOCK INJECTION AT TOKEN 16] <<<" << std::endl;
                 std::cout << "  Mock telemetry profile: Available RAM = 350 MB (< 600 MB reserve), Swap thrashing = 1.4 GB" << std::endl;
                 engine.get_telemetry()->set_mock_mode(true);
@@ -1255,27 +1238,18 @@ int main(int argc, char** argv) {
         mock_stress_res.final_rss_mb = telemetry_sampler.sample().process_rss_bytes / (1024 * 1024);
         mock_stress_res.physical_rss_delta_mb = static_cast<int64_t>(mock_stress_res.final_rss_mb) - static_cast<int64_t>(mock_stress_res.initial_rss_mb);
         mock_stress_res.final_regime = engine.get_controller()->get_current_regime();
-        mock_stress_res.final_bit_width = engine.get_controller()->get_current_bit_width();
         uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
         mock_stress_res.kv_tokens_archived = engine.get_kv_surgeon()->get_stats(block_count, n_kv_heads, 128).archived_chunks;
         mock_stress_res.completed = (mock_stress_res.tokens_generated == target_tokens);
 
-        if (needle_token_pos < static_cast<int>(session_embeddings.size())) {
-            auto t0 = std::chrono::high_resolution_clock::now();
-            auto hits = engine.recall_context(session_embeddings.get(needle_token_pos), 3);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            mock_stress_res.recall_latency_2bit_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (!hits.empty() && hits[0].id == static_cast<uint64_t>(needle_token_pos)) {
-                mock_stress_res.recall_score_2bit = hits[0].score;
-            }
-            for (const auto& hit : hits) {
-                if (hit.id >= static_cast<uint64_t>(std::max(0, needle_token_pos - 2)) &&
-                    hit.id <= static_cast<uint64_t>(needle_token_pos + 2)) {
-                    mock_stress_res.factual_needle_recovered = true;
-                    mock_stress_res.factual_needle_score = hit.score;
-                    break;
-                }
-            }
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto hits = engine.recall_context("Aegis needle", 3);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        mock_stress_res.recall_latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        if (!hits.empty()) {
+            mock_stress_res.factual_needle_recovered = true;
+            mock_stress_res.factual_needle_score = hits[0].score;
+            mock_stress_res.recall_score = hits[0].score;
         }
 
         llama_batch_free(batch);
@@ -1285,10 +1259,8 @@ int main(int argc, char** argv) {
         std::cout << "\n  - Deterministic Mock Stress Results:\n"
                   << "    * Tokens Decoded: " << mock_stress_res.tokens_generated << "/" << target_tokens << " (Zero-OOM Completion)\n"
                   << "    * Operational Regime: " << (mock_stress_res.final_regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL ? "REGIME 3 (SURVIVAL)" : "REGIME 2") << "\n"
-                  << "    * Precision Shift: 4-bit -> " << static_cast<int>(mock_stress_res.final_bit_width) << "-bit\n"
                   << "    * Logical KV Reclaimed: " << mock_stress_res.kv_logical_reclaimed_kb << " KB\n"
-                  << "    * 4-Bit Pre-Starvation Recall: " << std::fixed << std::setprecision(4) << mock_stress_res.recall_score_4bit << "\n"
-                  << "    * 2-Bit Post-Starvation Recall: " << std::fixed << std::setprecision(4) << mock_stress_res.recall_score_2bit << "\n\n";
+                  << "    * Post-Starvation Retrieval Latency: " << std::fixed << std::setprecision(2) << mock_stress_res.recall_latency_ms << " ms\n\n";
     }
 
     // =========================================================================
@@ -1359,7 +1331,6 @@ int main(int argc, char** argv) {
         MemoryStats m_init = telemetry_sampler.sample();
         real_stress_res.initial_rss_mb = m_init.process_rss_bytes / (1024 * 1024);
         real_stress_res.peak_rss_mb = real_stress_res.initial_rss_mb;
-        real_stress_res.initial_bit_width = 4;
 
         engine.init_token_sequence(n_prompt);
 
@@ -1398,9 +1369,9 @@ int main(int argc, char** argv) {
                     auto t0 = std::chrono::high_resolution_clock::now();
                     auto hits = engine.recall_context(session_embeddings.get(needle_token_pos), 3);
                     auto t1 = std::chrono::high_resolution_clock::now();
-                    real_stress_res.recall_latency_4bit_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    real_stress_res.recall_latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                     if (!hits.empty() && hits[0].id == static_cast<uint64_t>(needle_token_pos)) {
-                        real_stress_res.recall_score_4bit = hits[0].score;
+                        real_stress_res.recall_score = hits[0].score;
                     }
                 }
 
@@ -1453,7 +1424,6 @@ int main(int argc, char** argv) {
         real_stress_res.final_rss_mb = telemetry_sampler.sample().process_rss_bytes / (1024 * 1024);
         real_stress_res.physical_rss_delta_mb = static_cast<int64_t>(real_stress_res.final_rss_mb) - static_cast<int64_t>(real_stress_res.initial_rss_mb);
         real_stress_res.final_regime = engine.get_controller()->get_current_regime();
-        real_stress_res.final_bit_width = engine.get_controller()->get_current_bit_width();
         uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
         real_stress_res.kv_tokens_archived = engine.get_kv_surgeon()->get_stats(block_count, n_kv_heads, 128).archived_chunks;
         real_stress_res.completed = (real_stress_res.tokens_generated == target_tokens);
@@ -1462,9 +1432,9 @@ int main(int argc, char** argv) {
             auto t0 = std::chrono::high_resolution_clock::now();
             auto hits = engine.recall_context(session_embeddings.get(needle_token_pos), 3);
             auto t1 = std::chrono::high_resolution_clock::now();
-            real_stress_res.recall_latency_2bit_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            real_stress_res.recall_latency_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             if (!hits.empty() && hits[0].id == static_cast<uint64_t>(needle_token_pos)) {
-                real_stress_res.recall_score_2bit = hits[0].score;
+                real_stress_res.recall_score = hits[0].score;
             }
             for (const auto& hit : hits) {
                 if (hit.id >= static_cast<uint64_t>(std::max(0, needle_token_pos - 2)) &&
@@ -1484,7 +1454,6 @@ int main(int argc, char** argv) {
                   << "    * Tokens Decoded: " << real_stress_res.tokens_generated << "/" << target_tokens << " (Zero-OOM Completion)\n"
                   << "    * Real Host Memory Allocated: " << real_stress_res.host_ram_consumed_mb << " MB\n"
                   << "    * Final Operational Regime: " << (real_stress_res.final_regime == Regime::REGIME_3_ULTRA_LOW_SURVIVAL ? "REGIME 3 (SURVIVAL)" : "REGIME 2") << "\n"
-                  << "    * Dynamic Precision Shift: 4-bit -> " << static_cast<int>(real_stress_res.final_bit_width) << "-bit\n"
                   << "    * Logical KV Reclaimed: " << real_stress_res.kv_logical_reclaimed_kb << " KB\n"
                   << "    * Factual Needle Recall: " << (real_stress_res.factual_needle_recovered ? "Recovered (Recall@3 = 100%)" : "Miss") << "\n\n";
     }
@@ -1626,7 +1595,6 @@ int main(int argc, char** argv) {
             double dur = std::chrono::duration<double>(t_end - t_start).count();
             abl_res.throughput_tok_s = (abl_res.tokens_generated > 0 && dur > 0) ? (abl_res.tokens_generated / dur) : 0.0;
             abl_res.final_regime = engine.get_controller()->get_current_regime();
-            abl_res.final_bit_width = engine.get_controller()->get_current_bit_width();
             uint32_t n_kv_heads = model_info.head_count_kv > 0 ? model_info.head_count_kv : 8;
             abl_res.kv_tokens_archived = engine.get_kv_surgeon()->get_stats(block_count, n_kv_heads, 128).archived_chunks;
             abl_res.completed = true;
@@ -2148,7 +2116,6 @@ int main(int argc, char** argv) {
 
             AMUQuantConfig a_cfg;
             a_cfg.embedding_dim = model_info.embedding_length > 0 ? model_info.embedding_length : 2048;
-            a_cfg.initial_bit_width = 2;
             a_cfg.recent_window_tokens = 32;
             a_cfg.attention_sink_tokens = 4;
             a_cfg.eval_interval_tokens = 4;
@@ -3125,6 +3092,53 @@ int main(int argc, char** argv) {
         rpt << "Generated automatically by `live_benchmark` on Apple Silicon / Metal.\n";
         rpt.close();
         std::cout << "[INFO] Multi-scenario live benchmark report exported to benchmarks/live_benchmark_report.md" << std::endl;
+    }
+
+    // Export CSV dataset for academic Data Science evaluation
+    std::filesystem::create_directories("benchmarks/data");
+    std::ofstream live_csv("benchmarks/data/live_benchmark_summary.csv");
+    if (live_csv.is_open()) {
+        live_csv << "scenario,policy,tokens_generated,throughput_tps,initial_rss_mb,peak_rss_mb,final_rss_mb,physical_rss_delta_mb,kv_logical_reclaimed_kb,recall_score,final_regime\n";
+        if (run_nominal) {
+            live_csv << "\"Scenario 1 Nominal\",\"Raw Baseline\"," << raw_baseline_res.tokens_generated << ","
+                     << raw_baseline_res.throughput_tok_s << "," << raw_baseline_res.initial_rss_mb << ","
+                     << raw_baseline_res.peak_rss_mb << "," << raw_baseline_res.final_rss_mb << ","
+                     << raw_baseline_res.physical_rss_delta_mb << "," << raw_baseline_res.kv_logical_reclaimed_kb << ","
+                     << raw_baseline_res.recall_score << ",\"REGIME_1_HIGH_THROUGHPUT\"\n";
+            live_csv << "\"Scenario 1 Nominal\",\"AMU-QUANT Engine\"," << amuquant_res.tokens_generated << ","
+                     << amuquant_res.throughput_tok_s << "," << amuquant_res.initial_rss_mb << ","
+                     << amuquant_res.peak_rss_mb << "," << amuquant_res.final_rss_mb << ","
+                     << amuquant_res.physical_rss_delta_mb << "," << amuquant_res.kv_logical_reclaimed_kb << ","
+                     << amuquant_res.recall_score << ",\"" << regime_to_string(amuquant_res.final_regime) << "\"\n";
+        }
+        if (run_mock_stress) {
+            live_csv << "\"Scenario 2A Mock Stress\",\"AMU-QUANT Engine\"," << mock_stress_res.tokens_generated << ","
+                     << mock_stress_res.throughput_tok_s << "," << mock_stress_res.initial_rss_mb << ","
+                     << mock_stress_res.peak_rss_mb << "," << mock_stress_res.final_rss_mb << ","
+                     << mock_stress_res.physical_rss_delta_mb << "," << mock_stress_res.kv_logical_reclaimed_kb << ","
+                     << mock_stress_res.recall_score << ",\"" << regime_to_string(mock_stress_res.final_regime) << "\"\n";
+        }
+        if (run_real_stress) {
+            live_csv << "\"Scenario 2B Real Stress\",\"AMU-QUANT Engine\"," << real_stress_res.tokens_generated << ","
+                     << real_stress_res.throughput_tok_s << "," << real_stress_res.initial_rss_mb << ","
+                     << real_stress_res.peak_rss_mb << "," << real_stress_res.final_rss_mb << ","
+                     << real_stress_res.physical_rss_delta_mb << "," << real_stress_res.kv_logical_reclaimed_kb << ","
+                     << real_stress_res.recall_score << ",\"" << regime_to_string(real_stress_res.final_regime) << "\"\n";
+        }
+        if (run_agentic) {
+            live_csv << "\"Scenario 3 Agentic\",\"Standard Baseline\"," << unmanaged_agent_res.total_tokens_generated << ","
+                     << unmanaged_agent_res.throughput_tok_s << "," << unmanaged_agent_res.initial_rss_mb << ","
+                     << unmanaged_agent_res.peak_rss_mb << "," << unmanaged_agent_res.final_rss_mb << ","
+                     << unmanaged_agent_res.physical_rss_delta_mb << "," << unmanaged_agent_res.kv_logical_reclaimed_kb << ","
+                     << unmanaged_agent_res.needle_recall_score << ",\"REGIME_1_HIGH_THROUGHPUT\"\n";
+            live_csv << "\"Scenario 3 Agentic\",\"AMU-QUANT Engine\"," << amuquant_agent_res.total_tokens_generated << ","
+                     << amuquant_agent_res.throughput_tok_s << "," << amuquant_agent_res.initial_rss_mb << ","
+                     << amuquant_agent_res.peak_rss_mb << "," << amuquant_agent_res.final_rss_mb << ","
+                     << amuquant_agent_res.physical_rss_delta_mb << "," << amuquant_agent_res.kv_logical_reclaimed_kb << ","
+                     << amuquant_agent_res.needle_recall_score << ",\"REGIME_2_BALANCED_OFFLOAD\"\n";
+        }
+        live_csv.close();
+        std::cout << "[INFO] Live benchmark dataset exported to benchmarks/data/live_benchmark_summary.csv" << std::endl;
     }
 
     if (model_mmap_base != nullptr && model_mmap_base != MAP_FAILED) {

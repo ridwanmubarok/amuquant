@@ -102,6 +102,8 @@ bool GGUFParser::parse_file(const std::string& filepath, GGUFModelInfo& out_info
             f.read(reinterpret_cast<char*>(&out_info.head_count_kv), 4);
         } else if (key.find(".attention.key_length") != std::string::npos && val_type == static_cast<uint32_t>(GGUFType::UINT32)) {
             f.read(reinterpret_cast<char*>(&out_info.head_dim), 4);
+        } else if (key == "general.alignment" && val_type == static_cast<uint32_t>(GGUFType::UINT32)) {
+            f.read(reinterpret_cast<char*>(&out_info.alignment), 4);
         } else {
             skip_gguf_value(f, val_type);
         }
@@ -134,6 +136,24 @@ bool GGUFParser::parse_file(const std::string& filepath, GGUFModelInfo& out_info
         }
 
         out_info.tensors.push_back(std::move(t));
+    }
+
+    // Calculate tensor_data_offset aligned to general.alignment (default 32 bytes)
+    uint64_t tensor_info_end_pos = static_cast<uint64_t>(f.tellg());
+    uint64_t align = (out_info.alignment > 0) ? out_info.alignment : 32;
+    out_info.tensor_data_offset = (tensor_info_end_pos + align - 1) & ~(align - 1);
+
+    // Compute tensor byte sizes based on consecutive offsets
+    for (size_t i = 0; i < out_info.tensors.size(); ++i) {
+        if (i + 1 < out_info.tensors.size()) {
+            if (out_info.tensors[i + 1].offset > out_info.tensors[i].offset) {
+                out_info.tensors[i].size_bytes = static_cast<size_t>(out_info.tensors[i + 1].offset - out_info.tensors[i].offset);
+            }
+        } else {
+            uint64_t elements = 1;
+            for (uint64_t n : out_info.tensors[i].ne) elements *= n;
+            out_info.tensors[i].size_bytes = static_cast<size_t>(elements * 2);
+        }
     }
 
     return true;

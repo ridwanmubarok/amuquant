@@ -51,14 +51,18 @@ enum class Status : int32_t {
 };
 
 /**
- * @brief Host and process memory telemetry snapshot.
+ * @brief Host and process memory telemetry snapshot with decoupled metric accounting.
  */
 struct MemoryStats {
-    uint64_t total_ram_bytes{0};
-    uint64_t available_ram_bytes{0};
-    uint64_t process_rss_bytes{0};
-    uint64_t swap_used_bytes{0};
-    uint64_t major_page_faults{0};
+    uint64_t total_ram_bytes{0};              // Total system physical RAM
+    uint64_t available_ram_bytes{0};          // Available host physical RAM
+    uint64_t process_rss_bytes{0};            // Process Resident Set Size (RSS)
+    uint64_t physical_footprint_bytes{0};     // Physical dirty/internal footprint (Darwin phys_footprint, Linux VmRSS)
+    uint64_t swap_used_bytes{0};              // Host swap consumed
+    uint64_t major_page_faults{0};            // ru_majflt major page faults
+    uint64_t model_resident_bytes{0};         // Physical resident pages of model weights (via mincore)
+    uint64_t kv_logical_bytes{0};             // Logical capacity of active KV-cache
+    bool telemetry_valid{true};               // Telemetry status flag (false if OS query failed)
     double timestamp_sec{0.0};
 };
 
@@ -66,8 +70,8 @@ struct MemoryStats {
  * @brief Configuration parameters for the AMU-QUANT runtime engine.
  */
 struct AMUQuantConfig {
-    uint64_t memory_limit_bytes{14ULL * 1024ULL * 1024ULL * 1024ULL}; // Target working budget
-    uint64_t os_reserved_bytes{2ULL * 1024ULL * 1024ULL * 1024ULL};   // Reserved for OS kernel stability
+    uint64_t memory_limit_bytes{0}; // Target working budget (0 = auto-detect from host RAM)
+    uint64_t os_reserved_bytes{0};  // Reserved for OS kernel stability (0 = auto-detect)
     
     // Predictive pressure score weights: Phi_t = alpha * max(U_proc, U_sys) + beta * P_growth + gamma * P_swap
     double alpha{0.60};
@@ -95,7 +99,6 @@ struct AMUQuantConfig {
     uint32_t kv_heads{8};
     uint32_t head_dim{128};
     uint32_t kv_bytes_per_element{2}; // Cache format bytes per scalar (2 = FP16, 1 = FP8/Q8_0, 4 = FP32)
-    uint8_t initial_bit_width{4};
 
     // Arbitration decision policy and multi-objective weights
     ArbitrationPolicy policy{ArbitrationPolicy::THRESHOLD_HYSTERESIS};
@@ -138,16 +141,18 @@ struct StepDecision {
     uint32_t prefetch_depth{3};
     bool aggressive_evict{false};
     bool kv_pruned{false};
-    bool requantized_to_2bit{false};
     double phi_score{0.0};
     ArbitrationPolicy policy_used{ArbitrationPolicy::THRESHOLD_HYSTERESIS};
     double selected_utility_cost{0.0};
 
     // Telemetry tracking: Decision-time estimation vs post-eviction physical reclamation
     uint64_t estimated_savings_bytes{0};
-    uint64_t actual_reclaimed_bytes{0};
+    uint64_t actual_reclaimed_bytes{0};    // Kept for backward compatibility (= logical_reclaimed_bytes)
+    uint64_t logical_reclaimed_bytes{0};  // Logical KV working set bytes freed (O(1) bounding)
+    int64_t physical_rss_delta_bytes{0};  // Actual measured OS physical RSS delta post-eviction
     int64_t estimation_delta_bytes{0};
     double calibration_factor{1.0};
+    bool telemetry_error{false};
 };
 
 inline std::string regime_to_string(Regime r) {

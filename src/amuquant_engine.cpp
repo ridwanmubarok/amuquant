@@ -22,6 +22,43 @@ Status AMUQuantEngine::initialize() {
     telemetry_ = std::make_shared<SystemTelemetry>();
     layer_mgr_ = std::make_shared<LayerManager>();
     kv_surgeon_ = std::make_shared<KVSurgeon>();
+
+    // Wire layer manager and KV surgeon into telemetry for unified host memory accounting
+    telemetry_->set_layer_manager(layer_mgr_);
+    telemetry_->set_kv_surgeon(
+        kv_surgeon_,
+        config_.num_layers,
+        config_.kv_heads,
+        config_.head_dim,
+        config_.kv_bytes_per_element
+    );
+
+    // Auto-calibrate host RAM working budget if unconfigured (0)
+    uint64_t detected_ram = telemetry_->sample().total_ram_bytes;
+    if (detected_ram > 0) {
+        if (config_.memory_limit_bytes == 0) {
+            if (detected_ram <= 9ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.memory_limit_bytes = 6000ULL * 1024ULL * 1024ULL;
+            } else if (detected_ram <= 18ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.memory_limit_bytes = 12ULL * 1024ULL * 1024ULL * 1024ULL;
+            } else {
+                config_.memory_limit_bytes = static_cast<uint64_t>(detected_ram * 0.80);
+            }
+        }
+        if (config_.os_reserved_bytes == 0) {
+            if (detected_ram <= 9ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.os_reserved_bytes = 350ULL * 1024ULL * 1024ULL;
+            } else if (detected_ram <= 18ULL * 1024ULL * 1024ULL * 1024ULL) {
+                config_.os_reserved_bytes = 700ULL * 1024ULL * 1024ULL;
+            } else {
+                config_.os_reserved_bytes = static_cast<uint64_t>(detected_ram * 0.08);
+            }
+        }
+    } else {
+        if (config_.memory_limit_bytes == 0) config_.memory_limit_bytes = 6000ULL * 1024ULL * 1024ULL;
+        if (config_.os_reserved_bytes == 0) config_.os_reserved_bytes = 500ULL * 1024ULL * 1024ULL;
+    }
+
     controller_ = std::make_shared<AMUQuantController>(
         config_, telemetry_, layer_mgr_, kv_surgeon_
     );
@@ -146,6 +183,12 @@ std::string AMUQuantEngine::construct_grounded_prompt(
         &rel,
         &abstain
     );
+
+    if (abstain && !config_.enable_abstention_guardrail) {
+        prompt_block = "";
+        abstain = false;
+    }
+
     if (out_relevance) *out_relevance = rel;
     if (out_abstain_recommended) *out_abstain_recommended = abstain;
 

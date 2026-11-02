@@ -27,7 +27,7 @@ bool KVSurgeon::execute_eviction(
     const KVSeqRmFunc& seq_rm,
     const KVSeqAddFunc& seq_add
 ) {
-    if (!range.valid()) {
+    if (!range.valid() || range.p_start < 0 || range.p_end <= range.p_start || !seq_rm || !seq_add) {
         return false;
     }
 
@@ -40,6 +40,9 @@ bool KVSurgeon::execute_eviction(
             token_map_.append_token(static_cast<uint64_t>(i));
         }
     }
+
+    // Pre-flight snapshot of translation table state for rollback safety
+    std::vector<uint64_t> token_map_backup = token_map_.get_raw_map();
 
     size_t count = static_cast<size_t>(range.p_end - range.p_start);
     std::vector<uint64_t> logical_ids;
@@ -55,14 +58,13 @@ bool KVSurgeon::execute_eviction(
     // Phase 1: Prune physical KV sequence slot range [p_start, p_end)
     bool rm_ok = false;
     try {
-        if (seq_rm) {
-            rm_ok = seq_rm(range.p_start, range.p_end);
-        }
+        rm_ok = seq_rm(range.p_start, range.p_end);
     } catch (...) {
         rm_ok = false;
     }
 
     if (!rm_ok) {
+        failed_surgery_count_++;
         return false;
     }
 
@@ -71,14 +73,18 @@ bool KVSurgeon::execute_eviction(
     int32_t shift_delta = -(range.p_end - range.p_start);
     bool add_ok = true;
     try {
-        if (seq_add) {
-            add_ok = seq_add(range.p_end, -1, shift_delta);
-        }
+        add_ok = seq_add(range.p_end, -1, shift_delta);
     } catch (...) {
         add_ok = false;
     }
 
     if (!add_ok) {
+        failed_surgery_count_++;
+        // Rollback translation map state to avoid desynchronization
+        token_map_.reset();
+        for (uint64_t id : token_map_backup) {
+            token_map_.append_token(id);
+        }
         return false;
     }
 
@@ -114,6 +120,7 @@ KVSurgeryStats KVSurgeon::get_stats(uint32_t num_layers, uint32_t kv_heads, uint
     stats.last_surgery_latency_us = last_surgery_latency_us_;
     stats.total_surgery_latency_us = total_surgery_latency_us_;
     stats.total_surgery_count = total_surgery_count_;
+    stats.failed_surgery_count = failed_surgery_count_;
     stats.avg_surgery_latency_us = (total_surgery_count_ > 0) ? (total_surgery_latency_us_ / total_surgery_count_) : 0.0;
 
     return stats;
@@ -126,6 +133,7 @@ void KVSurgeon::reset() {
     last_surgery_latency_us_ = 0.0;
     total_surgery_latency_us_ = 0.0;
     total_surgery_count_ = 0;
+    failed_surgery_count_ = 0;
     token_map_.reset();
 }
 
